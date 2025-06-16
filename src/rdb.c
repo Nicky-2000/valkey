@@ -1404,7 +1404,7 @@ ustime_t runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
     }
 
     serverLog(LL_NOTICE, "Total keys processed across all threads: %ld",
-              atomic_load(&keys_processed_shared_atomic));
+              atomic_load(&shared_keys_processed));
 
     ustime_t duration = ustime() - start;
     return duration;
