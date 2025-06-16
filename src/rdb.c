@@ -1504,7 +1504,7 @@ void *process_slots_with_iterator(void *arg) {
 
             if (now - old_info_time_val >= 1000) {
                 if (atomic_compare_exchange_strong(shared_last_info_time_ms, &old_info_time_val, now)){
-                    
+                    sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, current_total_keys_before_add + 1, pname);
                 }
             }
         }
