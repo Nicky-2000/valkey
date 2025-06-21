@@ -51,23 +51,23 @@
 
 static hashtable *kvstoreIteratorNextHashtable(kvstoreIterator *kvs_it);
 
-struct _kvstore {
-    int flags;
-    hashtableType *dtype;
-    hashtable **hashtables;
-    int num_hashtables;
-    int num_hashtables_bits;
-    list *rehashing;                          /* List of hash tables in this kvstore that are currently rehashing. */
-    int resize_cursor;                        /* Cron job uses this cursor to gradually resize hash tables (only used if num_hashtables > 1). */
-    int allocated_hashtables;                 /* The number of allocated hashtables. */
-    int non_empty_hashtables;                 /* The number of non-empty hashtables. */
-    unsigned long long key_count;             /* Total number of keys in this kvstore. */
-    unsigned long long bucket_count;          /* Total number of buckets in this kvstore across hash tables. */
-    unsigned long long *hashtable_size_index; /* Binary indexed tree (BIT) that describes cumulative key frequencies up until
-                                               * given hashtable-index. */
-    size_t overhead_hashtable_lut;            /* Overhead of all hashtables in bytes. */
-    size_t overhead_hashtable_rehashing;      /* Overhead of hash tables rehashing in bytes. */
-};
+// struct _kvstore {
+//     int flags;
+//     hashtableType *dtype;
+//     hashtable **hashtables;
+//     int num_hashtables;
+//     int num_hashtables_bits;
+//     list *rehashing;                          /* List of hash tables in this kvstore that are currently rehashing. */
+//     int resize_cursor;                        /* Cron job uses this cursor to gradually resize hash tables (only used if num_hashtables > 1). */
+//     int allocated_hashtables;                 /* The number of allocated hashtables. */
+//     int non_empty_hashtables;                 /* The number of non-empty hashtables. */
+//     unsigned long long key_count;             /* Total number of keys in this kvstore. */
+//     unsigned long long bucket_count;          /* Total number of buckets in this kvstore across hash tables. */
+//     unsigned long long *hashtable_size_index; /* Binary indexed tree (BIT) that describes cumulative key frequencies up until
+//                                                * given hashtable-index. */
+//     size_t overhead_hashtable_lut;            /* Overhead of all hashtables in bytes. */
+//     size_t overhead_hashtable_rehashing;      /* Overhead of hash tables rehashing in bytes. */
+// };
 
 /* Structure for kvstore iterator that allows iterating across multiple hashtables. */
 struct _kvstoreIterator {
@@ -578,6 +578,17 @@ kvstoreIterator *kvstoreIteratorInit(kvstore *kvs, uint8_t flags) {
     return kvs_it;
 }
 
+kvstoreIterator *kvstoreIteratorInitFromIndex(kvstore *kvs, uint8_t flags, int start_didx) {
+    kvstoreIterator *kvs_it = zmalloc(sizeof(*kvs_it));
+    kvs_it->kvs = kvs;
+    kvs_it->didx = -1;
+
+    int firstNonEmptyIndex = kvstoreGetFirstNonEmptyHashtableIndex(kvs_it->kvs);
+    kvs_it->next_didx = start_didx > firstNonEmptyIndex ? start_didx : firstNonEmptyIndex;
+    hashtableInitIterator(&kvs_it->di, NULL, flags);
+    return kvs_it;
+}
+
 /* Free the kvs_it returned by kvstoreIteratorInit. */
 void kvstoreIteratorRelease(kvstoreIterator *kvs_it) {
     hashtableIterator *iter = &kvs_it->di;
@@ -622,6 +633,21 @@ int kvstoreIteratorNext(kvstoreIterator *kvs_it, void **next) {
         return hashtableNext(&kvs_it->di, next);
     }
 }
+
+int kvstoreIteratorNextWithEnd(kvstoreIterator *kvs_it, void **next, int end_didx) {
+    if (kvs_it->next_didx > end_didx) {
+        return 0;
+    } else if (kvs_it->didx != -1 && hashtableNext(&kvs_it->di, next)) {
+        return 1;
+    } else {
+        /* No current hashtable or reached the end of the hash table. */
+        hashtable *ht = kvstoreIteratorNextHashtable(kvs_it);
+        if (!ht) return 0;
+        hashtableReinitIterator(&kvs_it->di, ht);
+        return hashtableNext(&kvs_it->di, next);
+    }
+}
+
 
 /* This method traverses through kvstore hash tables and triggers a resize.
  * It first tries to shrink if needed, and if it isn't, it tries to expand. */

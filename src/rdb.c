@@ -31,7 +31,7 @@
  * All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  */
-
+#include "kvstore.h"
 #include "server.h"
 #include "cluster.h"
 #include "cluster_legacy.h"
@@ -1346,14 +1346,43 @@ typedef struct {
     _Atomic long *shared_keys_processed; // Pointer to the shared atomic counter
     _Atomic long *shared_last_info_time_ms; // Pointer to the SHARED atomic timestamp for sendChildInfo
     char *pname;            // The name of the process ("RDB" or "AOF rewrite")
+    int start_ht_idx; 
+    int end_ht_idx;
 } ThreadArgs;
 
 
-void *process_slots_with_iterator(void *arg);
+void *threaded_saving(void *arg);
 
-ustime_t runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
-    const long long start = ustime();
+void *threaded_saving(void *arg) {
+    ThreadArgs *args = (ThreadArgs *)arg;
+    int thread_id = args->thread_id;
+    int num_threads = args->num_threads;
+    int dbid = args->dbid;
 
+    rio *rdb = args->rdb; // The shared RIO object
+    pthread_mutex_t *write_mutex = args->write_mutex; // The shared mutex
+    _Atomic long *shared_keys_processed = args->shared_keys_processed; // Pointer to shared atomic keys counter
+    _Atomic long *shared_last_info_time_ms = args->shared_last_info_time_ms; // Pointer to shared atomic timestamp
+    
+    char *pname = args->pname; // The process name string (e.g., "RDB")
+    int start_ht_idx = args->start_ht_idx;
+    int end_ht_idx = args->end_ht_idx;
+
+    int current_thread_keys = 0;
+    int last_slot = -1;
+    ssize_t written_to_rio = 0;
+    ssize_t res;
+
+    serverDb *db = server.db + dbid;
+    kvstore *keys = db->keys;
+
+    int firstHashTableIndex = kvstoreFindHashtableIndexByKeyIndex(keys, 1);
+    hashtable* = 
+
+}
+
+int runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
+    int ret = 0;
     _Atomic long shared_keys_processed = ATOMIC_VAR_INIT(0);
     _Atomic long shared_last_info_time_ms = ATOMIC_VAR_INIT(0);
 
@@ -1362,14 +1391,42 @@ ustime_t runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
     if (pthread_mutex_init(&shared_write_mutex, NULL) != 0) {
         serverLog(LL_WARNING, "Failed to initialize shared mutex: %s", strerror(errno));
     }
+    serverDb *db = server.db + dbid; // Access the database struct
     
     pthread_t threads[num_threads];
+    kvstoreIterator *kv_iterators[num_threads];
     ThreadArgs thread_args[num_threads];
 
-    void *(*thread_func)(void *) = process_slots_with_iterator; 
-    
+    void *(*thread_func)(void *) = threaded_saving; 
+
+    //  Get slots owned by this node: 
+    clusterNode *myself = server.cluster->myself;
+    clusterGenNodesSlotsInfo(0);
+    unsigned int node_start_slot_overall = myself->slot_info_pairs[0];
+    unsigned int node_end_slot_overall = myself->slot_info_pairs[1]; // Inclusive end
+
+    serverLog(LL_NOTICE, "Node overall owned slot range: %u - %u", node_start_slot_overall, node_end_slot_overall);
+
+
+    // Calculate the total number of slots *this node owns* that need to be divided.
+    // The range is inclusive, so (end - start + 1) slots.
+    int num_slots_to_distribute = (node_end_slot_overall - node_start_slot_overall + 1);
+
+    // Calculate base number of slots per thread and remainder for distribution
+    int base_slots_per_thread = num_slots_to_distribute / num_threads;
+    int remainder_slots = num_slots_to_distribute % num_threads;
+
+    unsigned int current_thread_start_slot = node_start_slot_overall; // Initialize with the node's overall start slot
+
     // Create and launch threads
     for (int i = 0; i < num_threads; ++i) {
+        int thread_slots_count = base_slots_per_thread;
+        if (i < remainder_slots) {
+            thread_slots_count++; // Distribute remainder slots to the first `remainder_slots` threads
+        }
+
+        unsigned int thread_end_slot = current_thread_start_slot + thread_slots_count - 1; 
+
         thread_args[i].thread_id = i;
         thread_args[i].num_threads = num_threads;
         thread_args[i].dbid = dbid;
@@ -1379,6 +1436,15 @@ ustime_t runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
         thread_args[i].shared_last_info_time_ms = &shared_last_info_time_ms;
         thread_args[i].pname = pname;
 
+        // Assign the range of hash tables
+        thread_args[i].start_ht_idx = current_thread_start_slot;
+        thread_args[i].end_ht_idx = thread_end_slot;
+
+        serverLog(LL_NOTICE, "Thread %d assigned owned slot range [%u, %u]",
+                  i, thread_args[i].start_ht_idx, thread_args[i].end_ht_idx);
+
+        current_thread_start_slot += thread_slots_count; // Move cursor for the next thread
+
         if (pthread_create(&threads[i], NULL, thread_func, (void *)&thread_args[i]) != 0) {
             serverLog(LL_WARNING, "Failed to create thread %d: %s", i, strerror(errno));
             // Try to clean up the threads on failure
@@ -1387,7 +1453,7 @@ ustime_t runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
                 pthread_join(threads[j], NULL);
             }
             pthread_mutex_destroy(&shared_write_mutex);
-            return 0;
+            ret = 1;
         }
     }
 
@@ -1395,16 +1461,19 @@ ustime_t runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
     for (int i = 0; i < num_threads; ++i) {
         if (pthread_join(threads[i], NULL) != 0) {
             serverLog(LL_WARNING, "Failed to join thread %d: %s", i, strerror(errno));
+            ret = 1;
         }
     }
 
     // Destroy Mutex
     if (pthread_mutex_destroy(&shared_write_mutex) != 0) {
         serverLog(LL_WARNING, "Failed to destroy shared mutex: %s", strerror(errno));
+        ret = 1;
     }
 
     serverLog(LL_NOTICE, "Total keys processed across all threads: %ld",
               atomic_load(&shared_keys_processed));
+<<<<<<< HEAD
 
     ustime_t duration = ustime() - start;
     return duration;
@@ -1529,6 +1598,9 @@ werr: // Error handling for RIO writes
     serverLog(LL_WARNING, "Thread %d RDB save error. Unlocking mutex if locked.", args->thread_id);
     pthread_mutex_unlock(write_mutex); // Ensure unlock on error
     return NULL;
+=======
+    return ret;
+>>>>>>> 96a80157f (testing infrastructure)
 }
 
 
@@ -1558,16 +1630,22 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     if ((res = rdbSaveLen(rdb, expires_size)) < 0) goto werr;
     written += res;
 
+    long long save_start_us = ustime();
+    int success = runSaveThreads(rdb, dbid, server.rdb_snapshot_threads, pname);
+    // Batch release the iterators
+
+    long long save_end_us = ustime();
+    long long save_duration_us = save_end_us - save_start_us;
+
+    serverLog(LL_NOTICE, "RDB Save finished at %lldus. Total duration: %lldus", save_end_us, save_duration_us);
+    return 10;
+
+
+    // Old Implementation
     kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
     int last_slot = -1;
     /* Iterate this DB writing every entry */
     void *next;
-
-    int duration = 0;
-    int num_threads = 2;
-    duration = runSaveThreads(rdb, dbid, num_threads, pname);  
-    serverLog(LL_NOTICE, "process_slots_with_iterator Finished in %d, microseconds", duration);
-    return 10;
 
     while (kvstoreIteratorNext(kvs_it, &next)) {
         robj *o = next;

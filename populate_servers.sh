@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-NUM_HASHS_PER_LETTER=1
-NUM_KEYS_PER_HASH=1
+NUM_HASHS_PER_LETTER=10
+NUM_KEYS_PER_HASH=10
 
 echo "--- Populating ValKey Cluster ---"
 

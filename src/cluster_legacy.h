@@ -369,7 +369,7 @@ struct _clusterNode {
     int is_node_healthy;                    /* Boolean indicating the cached node health.
                                                Update with updateAndCountChangedNodeHealth(). */
 };
-
+void clusterGenNodesSlotsInfo(int filter);
 /* Struct used for storing slot statistics. */
 typedef struct slotStat {
     uint64_t cpu_usec;

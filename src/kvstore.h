@@ -8,6 +8,25 @@ typedef struct _kvstore kvstore;
 typedef struct _kvstoreIterator kvstoreIterator;
 typedef struct _kvstoreHashtableIterator kvstoreHashtableIterator;
 
+struct _kvstore {
+    int flags;
+    hashtableType *dtype;
+    hashtable **hashtables;
+    int num_hashtables;
+    int num_hashtables_bits;
+    list *rehashing;                          /* List of hash tables in this kvstore that are currently rehashing. */
+    int resize_cursor;                        /* Cron job uses this cursor to gradually resize hash tables (only used if num_hashtables > 1). */
+    int allocated_hashtables;                 /* The number of allocated hashtables. */
+    int non_empty_hashtables;                 /* The number of non-empty hashtables. */
+    unsigned long long key_count;             /* Total number of keys in this kvstore. */
+    unsigned long long bucket_count;          /* Total number of buckets in this kvstore across hash tables. */
+    unsigned long long *hashtable_size_index; /* Binary indexed tree (BIT) that describes cumulative key frequencies up until
+                                               * given hashtable-index. */
+    size_t overhead_hashtable_lut;            /* Overhead of all hashtables in bytes. */
+    size_t overhead_hashtable_rehashing;      /* Overhead of hash tables rehashing in bytes. */
+};
+
+
 typedef int(kvstoreScanShouldSkipHashtable)(hashtable *d);
 typedef int(kvstoreExpandShouldSkipHashtableIndex)(int didx);
 
@@ -44,9 +63,12 @@ size_t kvstoreHashtableMetadataSize(void);
 
 /* kvstore iterator specific functions */
 kvstoreIterator *kvstoreIteratorInit(kvstore *kvs, uint8_t flags);
+kvstoreIterator *kvstoreIteratorInitFromIndex(kvstore *kvs, uint8_t flags, int start_didx);
 void kvstoreIteratorRelease(kvstoreIterator *kvs_it);
 int kvstoreIteratorGetCurrentHashtableIndex(kvstoreIterator *kvs_it);
 int kvstoreIteratorNext(kvstoreIterator *kvs_it, void **next);
+int kvstoreIteratorNextWithEnd(kvstoreIterator *kvs_it, void **next, int end_didx);
+
 
 /* Rehashing */
 void kvstoreTryResizeHashtables(kvstore *kvs, int limit);

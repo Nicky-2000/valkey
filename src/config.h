@@ -350,6 +350,8 @@ void setcpuaffinity(const char *cpulist);
 
 #define IO_THREADS_MAX_NUM 256
 
+#define RDB_SNAPSHOT_THREADS_MAX_NUM 10
+
 #ifndef CACHE_LINE_SIZE
 #if defined(__aarch64__) && defined(__APPLE__)
 #define CACHE_LINE_SIZE 128
