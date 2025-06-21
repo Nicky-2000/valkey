@@ -45,6 +45,7 @@
 #include "bio.h"
 #include "zmalloc.h"
 #include "module.h"
+#include "rdb_mt.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -1473,134 +1474,7 @@ int runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
 
     serverLog(LL_NOTICE, "Total keys processed across all threads: %ld",
               atomic_load(&shared_keys_processed));
-<<<<<<< HEAD
-
-    ustime_t duration = ustime() - start;
-    return duration;
-}
-
-
-void *process_slots_with_iterator(void *arg) {
-    ThreadArgs *args = (ThreadArgs *)arg;
-
-    int thread_id = args->thread_id;
-    int num_threads = args->num_threads;
-    int dbid = args->dbid;
-    rio *rdb = args->rdb; // The shared RIO object
-    pthread_mutex_t *write_mutex = args->write_mutex; // The shared mutex
-    _Atomic long *shared_keys_processed = args->shared_keys_processed; // Pointer to shared atomic keys counter
-    _Atomic long *shared_last_info_time_ms = args->shared_last_info_time_ms; // Pointer to shared atomic timestamp
-    char *pname = args->pname; // The process name string (e.g., "RDB")
-    
-    // Local variables for this thread's progress and state
-    int current_thread_keys = 0; // Keys processed by THIS specific thread
-    int slots_processed_by_thread = 0; // Number of unique slots processed by THIS thread
-    int last_slot = -1; // To track last slot processed by THIS thread for slot_info opcode
-    ssize_t written_to_rio = 0; // Total bytes written by THIS thread to the shared RIO
-    ssize_t res;                // Result of single RIO write operations
-
-    serverDb *db = server.db + dbid; // Access the database struct
-
-
-    kvstoreIterator *kvs_it = NULL;
-    void *next;
-    kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
-
-    if (!kvs_it) {
-        serverLog(LL_WARNING, "Thread %d: Failed to initialize kvstore iterator. Error: %s",
-                   thread_id, strerror(errno));
-        return NULL; // Or handle error appropriately
-    }
-
-    while (kvstoreIteratorNext(kvs_it, &next)) {
-
-        int curr_slot = kvstoreIteratorGetCurrentHashtableIndex(kvs_it);
-        if ((curr_slot % args->num_threads) != args->thread_id) continue; // This slot belongs to another thread
-        
-        
-        /* Critical Section Starts: Protect RIO writes with Mutex. */
-        pthread_mutex_lock(args->write_mutex);
-        
-        /* Save slot info. */
-        if (server.cluster_enabled && curr_slot != last_slot) {
-            sds slot_info = sdscatprintf(sdsempty(), "%i,%lu,%lu", curr_slot, kvstoreHashtableSize(db->keys, curr_slot),
-                                         kvstoreHashtableSize(db->expires, curr_slot));
-            if ((res = rdbSaveAuxFieldStrStr(rdb, "slot-info", slot_info)) < 0) {
-                sdsfree(slot_info);
-                pthread_mutex_unlock(write_mutex); // Unlock before jumping to error handler
-                goto werr;
-            }
-            written_to_rio += res;
-            last_slot = curr_slot;
-            sdsfree(slot_info);
-        }
-        
-        /* Save key-value pair. */
-        robj *o = next;
-        sds keystr = objectGetKey(o);
-        robj key;
-        long long expire;
-        size_t rdb_bytes_before_key = rdb->processed_bytes;
-
-        initStaticStringObject(key, keystr);
-        expire = getExpire(db, &key); 
-
-        if ((res = rdbSaveKeyValuePair(rdb, &key, o, expire, dbid)) < 0) {
-            pthread_mutex_unlock(write_mutex);
-            goto werr;
-        }
-        written_to_rio += res;
-
-        /* In fork child process, we can try to release memory back to the
-         * OS and possibly avoid or decrease COW. We give the dismiss
-         * mechanism a hint about an estimated size of the object we stored. */
-        size_t dump_size = rdb->processed_bytes - rdb_bytes_before_key;
-        if (server.in_fork_child) dismissObject(o, dump_size);
-
-        pthread_mutex_unlock(write_mutex); 
-        /* Critical Section Over */
-
-        long current_total_keys_before_add = atomic_fetch_add(shared_keys_processed, 1);
-        current_thread_keys++;
-
-        /* --- PERIODIC sendChildInfo LOGIC (GLOBAL and THREAD-SAFE) --- */
-        // This block reports total progress to the main server process.
-        // It's checked every 1024 keys *globally* and every ~1 second.
-
-        if (((current_total_keys_before_add + 1) & 1023) == 0) {
-            long long now = mstime();
-            long long old_info_time_val = atomic_load(shared_last_info_time_ms); // Atomic read of the last time this was set
-
-            if (now - old_info_time_val >= 1000) {
-                if (atomic_compare_exchange_strong(shared_last_info_time_ms, &old_info_time_val, now)){
-                    sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, current_total_keys_before_add + 1, pname);
-                }
-            }
-        }
-        // --- END PERIODIC sendChildInfo LOGIC ---
-
-        serverLog(LL_NOTICE, "Iterator Thread %d processing key: %s (slot %d)",
-                  args->thread_id, keystr, curr_slot); // Log key processing
-    }
-
-    kvstoreIteratorRelease(kvs_it);
-
-    // Final logs (should also be mutex-protected if serverLog is truly not thread-safe)
-    pthread_mutex_lock(write_mutex);
-    serverLog(LL_NOTICE, "Iterator Thread %d processed %d keys (local count).", args->thread_id, current_thread_keys);
-    pthread_mutex_unlock(write_mutex);
-
-    return NULL;
-
-werr: // Error handling for RIO writes
-    if (kvs_it) kvstoreIteratorRelease(kvs_it);
-    // Log error, and ensure mutex is unlocked even on error path
-    serverLog(LL_WARNING, "Thread %d RDB save error. Unlocking mutex if locked.", args->thread_id);
-    pthread_mutex_unlock(write_mutex); // Ensure unlock on error
-    return NULL;
-=======
     return ret;
->>>>>>> 96a80157f (testing infrastructure)
 }
 
 
@@ -1646,6 +1520,12 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     int last_slot = -1;
     /* Iterate this DB writing every entry */
     void *next;
+
+    int duration = 0;
+    int num_threads = 1;
+    duration = runSaveThreads(rdb, dbid, num_threads, pname);  
+    // serverLog(LL_NOTICE, "process_slots_with_iterator Finished in %d, microseconds", duration);
+    // return 10;
 
     while (kvstoreIteratorNext(kvs_it, &next)) {
         robj *o = next;

@@ -195,5 +195,8 @@ int rdbFunctionLoad(rio *rdb, int ver, functionsLibCtx *lib_ctx, int rdbflags, s
 int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi);
 ssize_t rdbSaveFunctions(rio *rdb);
 rdbSaveInfo *rdbPopulateSaveInfo(rdbSaveInfo *rsi);
+ssize_t rdbSaveAuxField(rio *rdb, void *key, size_t keylen, void *val, size_t vallen);
+ssize_t rdbSaveAuxFieldStrStr(rio *rdb, char *key, char *val);
+
 
 #endif
