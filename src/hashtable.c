@@ -1201,6 +1201,11 @@ int hashtableIsRehashing(hashtable *ht) {
     return ht->rehash_idx != -1;
 }
 
+/* Returns the Rehash Index of the hashtable */
+int hashtableRehashIndex(hashtable *ht) {
+    return ht->rehash_idx;
+}
+
 /* Provides the number of buckets in the old and new tables during rehashing. To
  * get the sizes in bytes, multiply by HASHTABLE_BUCKET_SIZE. This function can
  * only be used when rehashing is in progress, and from the rehashingStarted and
@@ -2079,6 +2084,124 @@ unsigned hashtableSampleEntries(hashtable *ht, void **dst, unsigned count) {
      * the requested count and the size of the dst array. */
     return samples.seen <= count ? samples.seen : count;
 }
+
+/* --- Hastable Iterator with Range */
+
+/**
+ * Initialize a range-based iterator for a hashtable starting from a logical live-bucket index.
+ *
+ * In rehashing mode, the live bucket space is a flattened view of:
+ *     tables[0][rehash_idx .. n0 - 1] followed by tables[1][0 .. n1 - 1]
+ * where n0 and n1 are the number of buckets in tables[0] and tables[1] respectively.
+ *
+ * This function maps a given logical start index into the correct physical table and index.
+ * 
+ * Behavior is undefined if `start_logical_index` is greater than or equal to the number of live buckets.
+ */
+void hashtableInitRangeIterator(hashtableIterator *iterator, hashtable *ht, size_t start_logical_index) {
+    iter *iter = iteratorFromOpaque(iterator);
+    iter->hashtable = ht;
+    iter->flags = 0;
+    iter->pos_in_bucket = 0;
+
+    size_t rehash_idx = (ht->rehash_idx == -1) ? 0 : (size_t)ht->rehash_idx;
+    size_t n0 = numBuckets(ht->bucket_exp[0]);
+    size_t n1 = (ht->rehash_idx == -1) ? 0 : numBuckets(ht->bucket_exp[1]);
+
+    size_t live_buckets_0 = (rehash_idx <= n0) ? (n0 - rehash_idx) : 0;
+    size_t total_live = live_buckets_0 + n1;
+
+    if (start_logical_index >= total_live) {
+        // Should throw ERROR?
+        return;
+    }
+
+    if (start_logical_index < live_buckets_0) {
+        iter->table = 0;
+        iter->index = rehash_idx + start_logical_index;
+    } else {
+        iter->table = 1;
+        iter->index = start_logical_index - live_buckets_0;
+    }
+
+    iter->bucket = &ht->tables[iter->table][iter->index];
+}
+
+/**
+ * Fetch the next entry within a logical range from a hashtable iterator.
+ *
+ * Iterates over a range of *live* buckets across `tables[0]` and `tables[1]`.
+ * Stops when the logical index reaches `end_logical_index`, which should be based on
+ * the flattened view of live buckets:
+ *     tables[0][rehash_idx..n0-1] followed by tables[1][0..n1-1] (if rehashing).
+ *
+ * @param iterator             The initialized hashtable iterator.
+ * @param elemptr              Output pointer to the next entry (if found).
+ * @param end_logical_index    The exclusive upper bound on the logical bucket index.
+ * @return                     1 if an entry was found; 0 if end of range reached.
+ */
+
+int hashtableRangeNext(hashtableIterator *iterator, void **elemptr, size_t end_logical_index) {
+    iter *iter = iteratorFromOpaque(iterator);
+
+    size_t rehash_idx = (iter->hashtable->rehash_idx == -1) ? 0 : (size_t)iter->hashtable->rehash_idx;
+    size_t n0 = numBuckets(iter->hashtable->bucket_exp[0]);
+    size_t n1 = (iter->hashtable->rehash_idx == -1) ? 0 : numBuckets(iter->hashtable->bucket_exp[1]);
+    size_t live_buckets_0 = n0 - rehash_idx;
+
+    // Convert current physical table/index to logical index
+    size_t logical_index = (iter->table == 0)
+        ? (iter->index - rehash_idx)
+        : (live_buckets_0 + iter->index);
+
+    while (logical_index < end_logical_index) {
+        if (iter->pos_in_bucket >= ENTRIES_PER_BUCKET) {
+            if (iter->bucket->chained) {
+                iter->bucket = getChildBucket(iter->bucket);
+                iter->pos_in_bucket = 0;
+            } else {
+                iter->index++;
+                iter->pos_in_bucket = 0;
+
+                if (iter->table == 0 && iter->index >= n0) {
+                    if (n1 > 0) {
+                        iter->table = 1;
+                        iter->index = 0;
+                        iter->bucket = &iter->hashtable->tables[1][0];
+                        logical_index = live_buckets_0; // Reset logical index for table 1
+                        continue;
+                    } else {
+                        break; // No more tables
+                    }
+                }
+
+                if (iter->table == 0)
+                    iter->bucket = &iter->hashtable->tables[0][iter->index];
+                else if (iter->table == 1 && iter->index < n1)
+                    iter->bucket = &iter->hashtable->tables[1][iter->index];
+                else
+                    break;
+
+                // Update logical index after switching
+                logical_index = (iter->table == 0)
+                    ? (iter->index - rehash_idx)
+                    : (live_buckets_0 + iter->index);
+
+                continue;
+            }
+        }
+
+        if (isPositionFilled(iter->bucket, iter->pos_in_bucket)) {
+            *elemptr = iter->bucket->entries[iter->pos_in_bucket++];
+            return 1;
+        }
+
+        iter->pos_in_bucket++;
+    }
+
+    return 0; // Reached end_logical_index
+}
+
 
 /* --- Stats --- */
 

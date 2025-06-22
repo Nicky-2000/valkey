@@ -12,13 +12,13 @@ VALKEY_SERVER_PATH = "./src/valkey-server"
 VALKEY_CLI_PATH = "./src/valkey-cli"
 TEST_CONF_TEMPLATE = "testconfs/valkey_rdb_benchmark_cluster_base.conf" # Base Config File
 DEFAULT_TEMP_SUBDIR="valkey_rdb_benchmark_cluster_run"
-DEFAULT_START_PORT = 7000
+DEFAULT_START_PORT = 7001
 NUM_CLUSTER_NODES = 3 # Minimum 3 nodes for a functional cluster
 DEFAULT_DB_FILE = "dump.rdb"
 DEFAULT_LOG_FILE = "valkey.log"
 EXPECTED_KEYS_FILE = "expected_keys.json" # File to store populated keys for verification
-DEFAULT_KEY_SIZE = 1024
-DEFAULT_NUM_KEYS = int(10e6) 
+DEFAULT_KEY_SIZE = 100
+DEFAULT_NUM_KEYS = int(1e6) 
 RDB_SNAPSHOT_THREADS = 1
 
 # --- Helper Functions for Server Management ---
@@ -259,7 +259,7 @@ def populate_data_cluster(client: valkey.ValkeyCluster,
         pipe.set(key, value)
         EXPECTED_KEY_VALUES.append((key, value)) # Store for verification
 
-        if (i + 1) % 5000 == 0:
+        if (i + 1) % 50000 == 0:
             pipe.execute()
             print(f"  {i+1}/{num_keys} keys populated.", end='\r')
     pipe.execute() # Execute any remaining commands

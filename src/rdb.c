@@ -45,7 +45,6 @@
 #include "bio.h"
 #include "zmalloc.h"
 #include "module.h"
-#include "rdb_mt.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -58,6 +57,8 @@
 #include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/param.h>
+#include "rdb_parallel_batch.h"
+
 
 
 /* Size of the static buffer used for rdbcompression */
@@ -1338,143 +1339,124 @@ werr:
 }
 
 
-typedef struct {
-    int thread_id;          // Unique ID for this thread
-    int num_threads;        // Total number of threads
-    int dbid;               // Database ID
-    pthread_mutex_t *write_mutex; // Pointer to the shared mutex for RDB writes
-    rio *rdb;               // Pointer to the main RDB rio object (if shared)
-    _Atomic long *shared_keys_processed; // Pointer to the shared atomic counter
-    _Atomic long *shared_last_info_time_ms; // Pointer to the SHARED atomic timestamp for sendChildInfo
-    char *pname;            // The name of the process ("RDB" or "AOF rewrite")
-    int start_ht_idx; 
-    int end_ht_idx;
-} ThreadArgs;
+#define BUFFER_SIZE 4096
 
+static void rdbEncodeHashtableRange(void *args);
+// static void encode_bucket_to_buffer(bucket *bk, char *buffer, size_t bufsize, int thread_id);
+static void flushWorkerBuffers(ParallelBatchContext *ctx, rio *rdb);
 
-void *threaded_saving(void *arg);
+void rdbSaveHashtablesMultithreaded(rio *rdb, serverDb *db, int dbid, int num_threads) {
+    // Step 1: Create the batch parallel context
+    ParallelBatchContext *ctx = createParallelBatchContext(num_threads, BUFFER_SIZE, rdbEncodeHashtableRange);
+    kvstoreIterator *kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
+    hashtable *ht;
+    hashtableIterator iter;
 
-void *threaded_saving(void *arg) {
-    ThreadArgs *args = (ThreadArgs *)arg;
-    int thread_id = args->thread_id;
-    int num_threads = args->num_threads;
-    int dbid = args->dbid;
-
-    rio *rdb = args->rdb; // The shared RIO object
-    pthread_mutex_t *write_mutex = args->write_mutex; // The shared mutex
-    _Atomic long *shared_keys_processed = args->shared_keys_processed; // Pointer to shared atomic keys counter
-    _Atomic long *shared_last_info_time_ms = args->shared_last_info_time_ms; // Pointer to shared atomic timestamp
-    
-    char *pname = args->pname; // The process name string (e.g., "RDB")
-    int start_ht_idx = args->start_ht_idx;
-    int end_ht_idx = args->end_ht_idx;
-
-    int current_thread_keys = 0;
     int last_slot = -1;
-    ssize_t written_to_rio = 0;
-    ssize_t res;
+    // Step 2: Iterate through the hashtables in the kvstore
+    while ((ht = kvstoreIteratorNextHashtable(kvs_it)) != NULL) {
+        // Step 3: For each hashtable, write the metadata to the RDB file
+        int curr_slot = kvstoreIteratorGetCurrentHashtableIndex(kvs_it);
+        // Write slot metadata before the actual keys
+        if (server.cluster_enabled && curr_slot != last_slot) {
+            sds slot_info = sdscatprintf(sdsempty(), "%i,%lu,%lu", curr_slot,
+                                         kvstoreHashtableSize(db->keys, curr_slot),
+                                         kvstoreHashtableSize(db->expires, curr_slot));
+            rdbSaveAuxFieldStrStr(rdb, "slot-info", slot_info);
+            sdsfree(slot_info);
+            last_slot = curr_slot;
+        }
+        // Step 4: Pass this iterations hashtable to the parallel batch context
+        runParallelBatch(ctx, ht);
+        flushWorkerBuffers(ctx, rdb);
+    }
 
-    serverDb *db = server.db + dbid;
-    kvstore *keys = db->keys;
-
-    int firstHashTableIndex = kvstoreFindHashtableIndexByKeyIndex(keys, 1);
-    hashtable* = 
-
+    destroyParallelBatchContext(ctx);
 }
 
-int runSaveThreads(rio *rdb, int dbid, int num_threads, char *pname) {
-    int ret = 0;
-    _Atomic long shared_keys_processed = ATOMIC_VAR_INIT(0);
-    _Atomic long shared_last_info_time_ms = ATOMIC_VAR_INIT(0);
+static void rdbEncodeHashtableRange(void *ctx) {
+    // Step 1: Extract the thread arguments (including the hashtable and worker buffer)
+    ThreadArgs *args = (ThreadArgs *)ctx;
+    hashtable *ht = (hashtable *)args->user_data;
+    WorkerBuffer *wb = args->worker_buffer;
+    int tid = args->thread_id;
 
-    // Init mutex
-    pthread_mutex_t shared_write_mutex;
-    if (pthread_mutex_init(&shared_write_mutex, NULL) != 0) {
-        serverLog(LL_WARNING, "Failed to initialize shared mutex: %s", strerror(errno));
+    // Step 2: Use the hashtable, and the thread id to determine 
+    // the range of buckets this thread will process
+    int start_index = 0;
+    int end_index = 0;
+    int is_rehashing = hashtableIsRehashing(ht);
+    int total_buckets = hashtableBuckets(ht);
+
+    if (is_rehashing) {
+        // The buckets that have been rehashed are not included in the total count
+        total_buckets = total_buckets - hashtableRehashIndex(ht);
     }
-    serverDb *db = server.db + dbid; // Access the database struct
-    
-    pthread_t threads[num_threads];
-    kvstoreIterator *kv_iterators[num_threads];
-    ThreadArgs thread_args[num_threads];
 
-    void *(*thread_func)(void *) = threaded_saving; 
+    int base_buckets_per_thread = total_buckets / args->num_threads;
+    int remaining_buckets = total_buckets % args->num_threads;
 
-    //  Get slots owned by this node: 
-    clusterNode *myself = server.cluster->myself;
-    clusterGenNodesSlotsInfo(0);
-    unsigned int node_start_slot_overall = myself->slot_info_pairs[0];
-    unsigned int node_end_slot_overall = myself->slot_info_pairs[1]; // Inclusive end
+    if (tid < remaining_buckets) {
+        start_index = tid * (base_buckets_per_thread + 1);
+        end_index = start_index + base_buckets_per_thread + 1;
+    } else {
+        start_index = tid * base_buckets_per_thread + remaining_buckets;
+        end_index = start_index + base_buckets_per_thread;
+    }
+    hashtableIterator ht_iter;
+    hashtableInitRangeIterator(&ht_iter, ht, start_index, end_index);
+    void *next;
 
-    serverLog(LL_NOTICE, "Node overall owned slot range: %u - %u", node_start_slot_overall, node_end_slot_overall);
+    while(hashtableRangeNext(&ht_iter, &next, end_index)) {
+        // next is a pointer to an key value pair in the hashtable. 
+        // We want to encode this into rdb format and write it to the worker buffer.
+        // When we close to filling up this buffer we will signal that this buffer is full
+        // And move on to the next buffer.
+    }
 
+    for (int b = args->start_bucket; b < args->end_bucket; ++b) {
+        bucket *bk = &ht->tables[0][b];
+        if (!bk) continue;
 
-    // Calculate the total number of slots *this node owns* that need to be divided.
-    // The range is inclusive, so (end - start + 1) slots.
-    int num_slots_to_distribute = (node_end_slot_overall - node_start_slot_overall + 1);
+        int idx = wb->current_write_index;
+        int other = idx ^ 1;
 
-    // Calculate base number of slots per thread and remainder for distribution
-    int base_slots_per_thread = num_slots_to_distribute / num_threads;
-    int remainder_slots = num_slots_to_distribute % num_threads;
-
-    unsigned int current_thread_start_slot = node_start_slot_overall; // Initialize with the node's overall start slot
-
-    // Create and launch threads
-    for (int i = 0; i < num_threads; ++i) {
-        int thread_slots_count = base_slots_per_thread;
-        if (i < remainder_slots) {
-            thread_slots_count++; // Distribute remainder slots to the first `remainder_slots` threads
+        if (atomic_load(&wb->status[idx]) == BUFFER_FREE) {
+            encode_bucket_to_buffer(bk, wb->buffers[idx], 4096, tid);
+            atomic_store(&wb->status[idx], BUFFER_READY);
+            wb->current_write_index = other;
+        } else if (atomic_load(&wb->status[other]) == BUFFER_FREE) {
+            encode_bucket_to_buffer(bk, wb->buffers[other], 4096, tid);
+            atomic_store(&wb->status[other], BUFFER_READY);
+            wb->current_write_index = idx;
+        } else {
+            pthread_mutex_lock(&wb->mutex);
+            pthread_cond_wait(&wb->cond, &wb->mutex);
+            pthread_mutex_unlock(&wb->mutex);
+            b--;  // retry same bucket
         }
+    }
+}
 
-        unsigned int thread_end_slot = current_thread_start_slot + thread_slots_count - 1; 
+static void encode_element_to_buffer(bucket *bk, char *buffer, size_t bufsize, int thread_id) {
+    snprintf(buffer, bufsize, "[T%d] Bucket %p contents at %ld\n", thread_id, (void *)bk, time(NULL));
+    usleep(1000); // simulate work
+}
 
-        thread_args[i].thread_id = i;
-        thread_args[i].num_threads = num_threads;
-        thread_args[i].dbid = dbid;
-        thread_args[i].write_mutex = &shared_write_mutex;
-        thread_args[i].rdb = rdb;
-        thread_args[i].shared_keys_processed = &shared_keys_processed;
-        thread_args[i].shared_last_info_time_ms = &shared_last_info_time_ms;
-        thread_args[i].pname = pname;
+static void flushWorkerBuffers(ParallelBatchContext *ctx, rio *rdb) {
+    for (int i = 0; i < ctx->num_threads; ++i) {
+        WorkerBuffer *wb = &ctx->worker_buffers[i];
+        for (int j = 0; j < NUM_BUFFERS; ++j) {
+            if (atomic_load(&wb->status[j]) == BUFFER_READY) {
+                rioWrite(rdb, wb->buffers[j], strlen(wb->buffers[j]));
+                atomic_store(&wb->status[j], BUFFER_FREE);
 
-        // Assign the range of hash tables
-        thread_args[i].start_ht_idx = current_thread_start_slot;
-        thread_args[i].end_ht_idx = thread_end_slot;
-
-        serverLog(LL_NOTICE, "Thread %d assigned owned slot range [%u, %u]",
-                  i, thread_args[i].start_ht_idx, thread_args[i].end_ht_idx);
-
-        current_thread_start_slot += thread_slots_count; // Move cursor for the next thread
-
-        if (pthread_create(&threads[i], NULL, thread_func, (void *)&thread_args[i]) != 0) {
-            serverLog(LL_WARNING, "Failed to create thread %d: %s", i, strerror(errno));
-            // Try to clean up the threads on failure
-            for (int j = 0; j < i; ++j) {
-                pthread_cancel(threads[j]);
-                pthread_join(threads[j], NULL);
+                pthread_mutex_lock(&wb->mutex);
+                pthread_cond_signal(&wb->cond);
+                pthread_mutex_unlock(&wb->mutex);
             }
-            pthread_mutex_destroy(&shared_write_mutex);
-            ret = 1;
         }
     }
-
-    // Wait for all threads to complete
-    for (int i = 0; i < num_threads; ++i) {
-        if (pthread_join(threads[i], NULL) != 0) {
-            serverLog(LL_WARNING, "Failed to join thread %d: %s", i, strerror(errno));
-            ret = 1;
-        }
-    }
-
-    // Destroy Mutex
-    if (pthread_mutex_destroy(&shared_write_mutex) != 0) {
-        serverLog(LL_WARNING, "Failed to destroy shared mutex: %s", strerror(errno));
-        ret = 1;
-    }
-
-    serverLog(LL_NOTICE, "Total keys processed across all threads: %ld",
-              atomic_load(&shared_keys_processed));
-    return ret;
 }
 
 
@@ -1504,15 +1486,18 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     if ((res = rdbSaveLen(rdb, expires_size)) < 0) goto werr;
     written += res;
 
-    long long save_start_us = ustime();
-    int success = runSaveThreads(rdb, dbid, server.rdb_snapshot_threads, pname);
-    // Batch release the iterators
 
-    long long save_end_us = ustime();
-    long long save_duration_us = save_end_us - save_start_us;
+    if (server.rdb_snapshot_threads > 1) {
+        long long save_start_us = ustime();
+        rdbSaveHashtablesMultithreaded(rdb, db, dbid, server.rdb_snapshot_threads);
+        long long save_end_us = ustime();
+        long long save_duration_us = save_end_us - save_start_us;
 
-    serverLog(LL_NOTICE, "RDB Save finished at %lldus. Total duration: %lldus", save_end_us, save_duration_us);
-    return 10;
+        serverLog(LL_NOTICE, "RDB Save finished at %lldus. Total duration: %lldus", save_end_us, save_duration_us);
+        return 10;
+    }
+    // Fall back to original single-threaded implementation
+
 
 
     // Old Implementation
@@ -1520,12 +1505,6 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     int last_slot = -1;
     /* Iterate this DB writing every entry */
     void *next;
-
-    int duration = 0;
-    int num_threads = 1;
-    duration = runSaveThreads(rdb, dbid, num_threads, pname);  
-    // serverLog(LL_NOTICE, "process_slots_with_iterator Finished in %d, microseconds", duration);
-    // return 10;
 
     while (kvstoreIteratorNext(kvs_it, &next)) {
         robj *o = next;
