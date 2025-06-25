@@ -1,0 +1,170 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Valkey Server (Follow Child)", // Renamed for clarity
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/valkey-server",
+            "args": [
+                // Optional: Provide a path to your valkey.conf if you use one.
+                // For example: "${workspaceFolder}/valkey.conf",
+                // Or specify a port if not using default: "--port", "6379"
+            ],
+            "stopAtEntry": false, // False means it won't stop at main() by default, it will run until a breakpoint
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false, // Recommended: See Valkey logs in a separate terminal
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Follow child process after fork for BGSAVE",
+                    "text": "set follow-fork-mode child", // <<< ADD THIS LINE FOR FORK DEBUGGING
+                    "ignoreFailures": false
+                },
+                // {
+                //     "description": "Allow all threads to run when one is paused",
+                //     "text": "set scheduler-locking off", // <<< ADD THIS LINE FOR MULTI-THREADED DEBUGGING
+                //     "ignoreFailures": false
+                // },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build-valkey-debug" // Optional: run a task before launching
+        },
+        {
+            "name": "Debug Valkey CLI",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/valkey-cli", // Path to the compiled CLI binary
+            "args": [], // Arguments for the CLI (e.g., -p <port> -h <host>)
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build-valkey-debug" // Optional: run a task before launching
+        },
+                {
+            "name": "kvstore tests",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/valkey-unit-tests",
+            "args": [
+                "--single",
+                "test_kvstore.c"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build_valkey_tests" // Optional: specify a build task if needed
+        },
+        {
+            "name": "Run ValKey Server Port 7000", // Renamed for clarity
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/valkey-server",
+            "args": [
+                "${workspaceFolder}/testconfs/valkey7000.conf",
+                // For example: "${workspaceFolder}/valkey.conf",
+                // Or specify a port if not using default: "--port", "6379"
+            ],
+            "stopAtEntry": false, // False means it won't stop at main() by default, it will run until a breakpoint
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Follow child process after fork for BGSAVE",
+                    "text": "set follow-fork-mode child", // <<< ADD THIS LINE FOR FORK DEBUGGING
+                    "ignoreFailures": false
+                },
+                // {
+                //     "description": "Allow all threads to run when one is paused",
+                //     "text": "set scheduler-locking off", // <<< ADD THIS LINE FOR MULTI-THREADED DEBUGGING
+                //     "ignoreFailures": false
+                // },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "clean-valkey-data-dir-port-7000" // Optional: run a task before launching
+        },
+                {
+            "name": "Run ValKey Server Port 7001", // Renamed for clarity
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/valkey-server",
+            "args": [
+                "${workspaceFolder}/testconfs/valkey7001.conf",
+                // For example: "${workspaceFolder}/valkey.conf",
+                // Or specify a port if not using default: "--port", "6379"
+            ],
+            "stopAtEntry": false, // False means it won't stop at main() by default, it will run until a breakpoint
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Follow child process after fork for BGSAVE",
+                    "text": "set follow-fork-mode child", // <<< ADD THIS LINE FOR FORK DEBUGGING
+                    "ignoreFailures": false
+                },
+                // {
+                //     "description": "Allow all threads to run when one is paused",
+                //     "text": "set scheduler-locking off", // <<< ADD THIS LINE FOR MULTI-THREADED DEBUGGING
+                //     "ignoreFailures": false
+                // },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "clean-valkey-data-dir-port-7001" // Optional: run a task before launching
+        },
+    ]
+}

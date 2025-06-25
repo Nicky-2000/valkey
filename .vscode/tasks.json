@@ -1,0 +1,62 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build-valkey-debug",
+            "type": "shell",
+            "command": "make BUILD_DEBUG=yes",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Builds Valkey with debug symbols"
+        },
+        {
+            "label": "build_valkey_tests",
+            "type": "shell",
+            "command": "make valkey-unit-tests", // Or your specific build command
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "detail": "Builds the valkey unit tests executable"
+        },
+        {
+            "label": "clean-valkey-data-dir-port-7000",
+            "type": "shell",
+            "command": "rm -rf ${workspaceFolder}/tmp/valkey-cluster-7000/*",
+            "group": "build",
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "silent", // Don't open a new terminal just for this
+                "panel": "shared"   // Share the terminal with other tasks if needed
+            }
+        },
+        {
+            "label": "clean-valkey-data-dir-port-7001",
+            "type": "shell",
+            "command": "rm -rf ${workspaceFolder}/tmp/valkey-cluster-7001/*",
+            "group": "build",
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "silent", // Don't open a new terminal just for this
+                "panel": "shared"   // Share the terminal with other tasks if needed
+            }
+        }
+    ]
+}
