@@ -68,6 +68,8 @@ void kvstoreIteratorRelease(kvstoreIterator *kvs_it);
 int kvstoreIteratorGetCurrentHashtableIndex(kvstoreIterator *kvs_it);
 int kvstoreIteratorNext(kvstoreIterator *kvs_it, void **next);
 int kvstoreIteratorNextWithEnd(kvstoreIterator *kvs_it, void **next, int end_didx);
+hashtable *kvstoreIteratorNextHashtable(kvstoreIterator *kvs_it);
+
 
 
 /* Rehashing */

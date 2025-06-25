@@ -19,7 +19,7 @@ DEFAULT_LOG_FILE = "valkey.log"
 EXPECTED_KEYS_FILE = "expected_keys.json" # File to store populated keys for verification
 DEFAULT_KEY_SIZE = 100
 DEFAULT_NUM_KEYS = int(1e6) 
-RDB_SNAPSHOT_THREADS = 1
+RDB_SNAPSHOT_THREADS = 5
 
 # --- Helper Functions for Server Management ---
 def start_valkey_server(port: int, conf_path: str, data_dir: str, log_file_path: str,
