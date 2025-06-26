@@ -1,3 +1,5 @@
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 import subprocess
 import time
 import os
@@ -17,9 +19,11 @@ NUM_CLUSTER_NODES = 3 # Minimum 3 nodes for a functional cluster
 DEFAULT_DB_FILE = "dump.rdb"
 DEFAULT_LOG_FILE = "valkey.log"
 EXPECTED_KEYS_FILE = "expected_keys.json" # File to store populated keys for verification
-DEFAULT_KEY_SIZE = 100
-DEFAULT_NUM_KEYS = int(1e6) 
-RDB_SNAPSHOT_THREADS = 5
+DEFAULT_KEY_SIZE = 1000
+DEFAULT_NUM_KEYS = int(10e6) 
+RDB_SNAPSHOT_THREADS = 4
+
+NUM_PROCESSES = 40
 
 # --- Helper Functions for Server Management ---
 def start_valkey_server(port: int, conf_path: str, data_dir: str, log_file_path: str,
@@ -148,7 +152,7 @@ def start_valkey_cluster(num_nodes: int, start_port: int, conf_path: str, temp_b
         print(f"ERROR creating cluster: {cluster_create_process.stderr}")
         print(cluster_create_process.stderr)
         stop_valkey_cluster(processes, clients) # Stop existing clients
-        return None, None, None, None # Return None for the cluster_client as well
+        return  None, None, None, None, None # Return None for the cluster_client as well
     
     print("Cluster creation initiated. Waiting for cluster to stabilize...")
     cluster_stable_timeout = 60
@@ -158,7 +162,7 @@ def start_valkey_cluster(num_nodes: int, start_port: int, conf_path: str, temp_b
     # Ensure clients are connected before checking cluster_info
     if not clients: # This should ideally not happen if nodes started successfully
         print("No clients available to check cluster status. Aborting.")
-        return None, None, None, None # Return None for the cluster_client as well
+        return  None, None, None, None, None# Return None for the cluster_client as well
 
     while elapsed_stable_time < cluster_stable_timeout:
         try:
@@ -197,7 +201,7 @@ def start_valkey_cluster(num_nodes: int, start_port: int, conf_path: str, temp_b
             except Exception as log_e:
                 print(f"Could not read log for port {port}: {log_e}")
         stop_valkey_cluster(processes, clients) # Stop existing clients
-        return None, None, None, None # Return None for the cluster_client as well
+        return None, None, None, None, None # Return None for the cluster_client as well
 
     # --- NOW, CREATE THE VALKEYCLUSTER CLIENT FOR APPLICATION-LEVEL COMMANDS ---
     # This client is aware of the cluster topology and handles MOVED/ASK redirections.
@@ -216,7 +220,7 @@ def start_valkey_cluster(num_nodes: int, start_port: int, conf_path: str, temp_b
         stop_valkey_cluster(processes, clients) # Stop existing clients
         return None, None, None, None # Return None for the cluster_client as well
 
-    return processes, clients, cluster_client, node_addresses
+    return startup_nodes_for_cluster_client, processes, clients, cluster_client, node_addresses
 
 def stop_valkey_cluster(processes: list[subprocess.Popen], clients: list[valkey.Valkey]): 
     """Stops all Valkey cluster nodes."""
@@ -232,47 +236,152 @@ def stop_valkey_cluster(processes: list[subprocess.Popen], clients: list[valkey.
 # Global list to store expected keys for verification
 EXPECTED_KEY_VALUES = []
 
+def make_key(hash_tag_prefix: str, index: int) -> str:
+    return f"{{{hash_tag_prefix}{index}}}:key_{index}"
 
-def populate_data_cluster(client: valkey.ValkeyCluster,
+def make_val(key:str, key_value_size: int) -> str:
+    return key + "a" * (key_value_size - len(key)) # Can make this different later
+    
+
+def populate_data_cluster(cluster_startup_nodes: list[valkey.cluster.ClusterNode],
                           num_keys: int,
                           key_value_size: int,
-                          temp_base_dir: str,
+                          temp_base_dir: str, # temp_base_dir is still needed for saving final expected_keys.json
                           hash_tag_prefix: str = "hash"):
     """
-    Populates the Valkey cluster with string keys using hash tags.
-    Stores key-value pairs in EXPECTED_KEY_VALUES for later verification.
+    Populates the Valkey cluster with string keys using multiprocessing.
+    All keys are generated in the main process, then chunks are sent to workers.
     """
-    print(f"Populating {num_keys} keys with {key_value_size} bytes each into the cluster...")
-    
-    # Clear previous expected keys
+    start_time = time.time()
+    print(f"Generating {num_keys} keys with {key_value_size} bytes each in main process...")
+
     global EXPECTED_KEY_VALUES
-    EXPECTED_KEY_VALUES = []
+    EXPECTED_KEY_VALUES = [] # Clear previous expected keys
 
-    pipe = client.pipeline() # Use pipeline for efficiency
+    # Pre-generate all keys and values in the main process
     for i in range(num_keys):
-        key = f"{{{hash_tag_prefix}{i}}}:key_{i}" # Example: {hash0}:key_0, {hash1}:key_1
-        
-        
-        value = key + "a" * (key_value_size - len(key)) # Can make this different later
-        assert len(value) == key_value_size, f"Value len is incorrect: {len(value)} != {key_value_size}"
-        
-        pipe.set(key, value)
-        EXPECTED_KEY_VALUES.append((key, value)) # Store for verification
+        key = make_key(hash_tag_prefix, i)
+        # value = make_val(key, key_value_size)
+        EXPECTED_KEY_VALUES.append(key)
+    
+    print(f"Time to generate keys: {time.time() - start_time}")
+    start_time = time.time()
 
-        if (i + 1) % 50000 == 0:
-            pipe.execute()
-            print(f"  {i+1}/{num_keys} keys populated.", end='\r')
-    pipe.execute() # Execute any remaining commands
-    print(f"  {num_keys}/{num_keys} keys populated.")
-    print("Data population complete.")
+    print(f"Main process generated {num_keys} key-value pairs.")
+    print("Starting multiprocessing population into the cluster...")
 
-    # # Save expected keys to a file to use in verification later
-    # with open(os.path.join(os.path.dirname(client.connection_pool.connection_kwargs['path']) if 'path' in client.connection_pool.connection_kwargs else temp_base_dir, EXPECTED_KEYS_FILE), 'w') as f:
-    #      json.dump(EXPECTED_KEY_VALUES, f)
-    # print(f"Expected key-value pairs saved to {os.path.join(temp_base_dir, EXPECTED_KEYS_FILE)}")
+    # Determine optimal number of processes
+    num_processes = multiprocessing.cpu_count()
+    if num_processes > num_keys: # Don't create more processes than keys
+        num_processes = num_keys
+    if num_processes == 0:
+        print("No processes available for population. Skipping.", file=sys.stderr)
+        return
+    
+    num_processes = NUM_PROCESSES
+    print(f"Num Processes for submitting keys = {num_processes}")
+
+    chunk_size = (len(EXPECTED_KEY_VALUES) + num_processes - 1) // num_processes # Ceil division
+
+     # Convert valkey.cluster.ClusterNode objects to a picklable format (list of tuples)
+    picklable_cluster_startup_nodes_info = [(node.host, node.port) for node in cluster_startup_nodes]
+    print(picklable_cluster_startup_nodes_info)
+
+    # Using ProcessPoolExecutor for parallel execution
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        futures = []
+        for i in range(num_processes):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, len(EXPECTED_KEY_VALUES))
+            if start_idx >= len(EXPECTED_KEY_VALUES): # No more keys to process for this worker
+                continue
+
+            # Get the slice of keys and values for this worker
+            keys_slice = EXPECTED_KEY_VALUES[start_idx:end_idx] # .copy() to ensure each process gets its own copy
+
+            # Submit task to the pool, passing the picklable info
+            
+            futures.append(executor.submit(_populate_worker_task,
+                                           keys_slice,
+                                           picklable_cluster_startup_nodes_info,
+                                           key_value_size,
+                                           i))
+
+        # Wait for all futures to complete and handle results
+        all_workers_successful = True
+        for i, future in enumerate(as_completed(futures)):
+            if future.result():
+                print(f"Main: Worker {i} finished populating its keys.")
+            else:
+                print(f"Main: Worker {i} failed.", file=sys.stderr)
+                all_workers_successful = False
+
+    if not all_workers_successful:
+        print("WARNING: Some workers failed during population. Data might be incomplete.", file=sys.stderr)
+    
+    end_time = time.time()
+    load_time = end_time - start_time
+    keys_per_second = num_keys / load_time
+    print(f"Total time to load keys: {end_time - start_time} seconds")
+    print(f"Keys per second: {keys_per_second}")
 
 
-def verify_data_cluster(client: valkey.ValkeyCluster):
+# --- Data Population (Multiprocessed) ---
+def _populate_worker_task(keys: list[str],
+                          cluster_startup_nodes_info: list[tuple[str, int]], key_value_size: int,
+                          worker_id: int):
+    """
+    Worker function for populating a given list of keys into the Valkey cluster.
+    Each worker creates its own client.
+    """
+    print(f"Running worker {worker_id}")
+    worker_client = None
+    
+    # State variables for progress tracking
+    total_keys_in_slice = len(keys)
+    percentage_interval = 50 # Report every 10%
+    last_reported_percentage = -1 # Initialize to -1 to ensure 0% is printed immediately if total_keys_in_slice > 0
+
+    try:
+        # Reconstruct ClusterNode objects from picklable info
+        startup_nodes_for_worker = [valkey.cluster.ClusterNode(host, port) for host, port in cluster_startup_nodes_info]
+        worker_client = valkey.ValkeyCluster(startup_nodes=startup_nodes_for_worker, decode_responses=True)
+        worker_client.ping() # Verify connection
+
+        pipe = worker_client.pipeline()
+        num_processed = 0
+
+        for key in keys:
+            value = make_val(key, key_value_size)
+            pipe.set(key, value)
+            num_processed += 1
+
+            if num_processed % 50000 == 0: # Smaller batch size for worker updates
+                # print(f"Worker {worker_id} populated {num_processed} keys")
+                pipe.execute()
+               # NEW: Separate condition for percentage print updates
+            # if total_keys_in_slice > 0: # Avoid division by zero
+            #     current_percentage = int((num_processed / total_keys_in_slice) * 100)
+                
+                # Print only when a new percentage interval is reached
+                # if current_percentage >= last_reported_percentage + percentage_interval or num_processed == total_keys_in_slice:
+                #     print(f"Worker {worker_id}: {current_percentage}% done ({num_processed}/{total_keys_in_slice} keys)")
+                #     last_reported_percentage = current_percentage
+        pipe.execute() # Execute any remaining commands
+
+        print(f"Worker {worker_id} completed {num_processed} keys.")
+        return True # Indicate success
+    except Exception as e:
+        print(f"Worker {worker_id} failed: {e}", file=sys.stderr)
+        return False # Indicate failure
+    finally:
+        if worker_client:
+            try:
+                worker_client.connection_pool.disconnect()
+            except Exception:
+                pass
+    
+def verify_data_cluster(client: valkey.ValkeyCluster, key_value_size: int):
     """
     Verifies the existence and correctness of keys populated in the cluster.
     Assumes EXPECTED_KEY_VALUES global list is populated.
@@ -288,9 +397,9 @@ def verify_data_cluster(client: valkey.ValkeyCluster):
     # connect to the master of the specific slot. For now, we assume simple client.get()
     # will work due to server-side redirection or a smart client.
 
-    for i, (expected_key, expected_value) in enumerate(EXPECTED_KEY_VALUES):
-        if (i % 100) != 0: 
-            continue
+    for i in range(0, len(EXPECTED_KEY_VALUES), 10000):
+        expected_key = EXPECTED_KEY_VALUES[i]
+        expected_value = make_val(expected_key, key_value_size)
         try:
             actual_value = client.get(expected_key)
             
@@ -325,7 +434,7 @@ def run_bgsave_benchmark_cluster(start_port: int, num_nodes: int, conf_path: str
     and parsing server-side logs for internal timings.
     """
     
-    processes, clients, cluster_client_for_commands, node_addresses = start_valkey_cluster(num_nodes, start_port, conf_path, temp_base_dir)
+    cluster_startup_nodes, processes, clients, cluster_client_for_commands, node_addresses = start_valkey_cluster(num_nodes, start_port, conf_path, temp_base_dir)
     if not processes:
         print("Failed to start cluster. Aborting benchmark.")
         return None
@@ -333,9 +442,9 @@ def run_bgsave_benchmark_cluster(start_port: int, num_nodes: int, conf_path: str
     try:
         # Use the dedicated cluster_client_for_commands (or node_addresses for CLI pipe) for population
         # Use the CLI pipe method for faster population
-        populate_data_cluster(cluster_client_for_commands, num_keys, key_value_size, temp_base_dir)
+        populate_data_cluster(cluster_startup_nodes, num_keys, key_value_size, temp_base_dir)
 
-        initial_verification_ok = verify_data_cluster(cluster_client_for_commands)
+        initial_verification_ok = verify_data_cluster(cluster_client_for_commands, key_value_size)
         if not initial_verification_ok:
             print("Initial data verification failed. Aborting benchmark.")
             return None
@@ -352,7 +461,7 @@ def run_bgsave_benchmark_cluster(start_port: int, num_nodes: int, conf_path: str
         print("\n--- All BGSAVE operations initiated and monitored. ---")
         
         # Post-BGSAVE data verification (using the cluster client)
-        post_bgsave_verification_ok = verify_data_cluster(cluster_client_for_commands)
+        post_bgsave_verification_ok = verify_data_cluster(cluster_client_for_commands, key_value_size)
         if not post_bgsave_verification_ok:
             print("WARNING: Data verification failed after BGSAVE operations on cluster.")
             
@@ -370,6 +479,7 @@ def run_bgsave_benchmark_cluster(start_port: int, num_nodes: int, conf_path: str
         # You might want to add aggregated timing metrics here, e.g., max/min/avg duration across nodes
         total_client_bgsave_duration = sum(r.get('client_bgsave_duration', 0) for r in all_node_bgsave_results if 'client_bgsave_duration' in r)
         aggregated_results["total_client_bgsave_duration_sum"] = total_client_bgsave_duration
+        aggregated_results["average_bgsave_duration"] =  sum(r.get('client_bgsave_duration', 0) for r in all_node_bgsave_results if 'client_bgsave_duration' in r)/num_nodes
         aggregated_results["max_client_bgsave_duration"] = max(r.get('client_bgsave_duration', 0) for r in all_node_bgsave_results if 'client_bgsave_duration' in r)
         
         return aggregated_results

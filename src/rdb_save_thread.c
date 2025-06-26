@@ -44,7 +44,7 @@ void rdbEncodeHashtableRange(void *arg) {
     int start_index = thread_bucket_range.start_index;
     int end_index = thread_bucket_range.end_index;
 
-    serverLog(LL_NOTICE, "Thread ID %d is responsible for buckets [%d, %d)", tid, start_index, end_index);
+    // serverLog(LL_NOTICE, "Thread ID %d is responsible for buckets [%d, %d)", tid, start_index, end_index);
     
     // Step 3: Iterate over all the elements in the hashtable bucket range
     hashtableIterator ht_iter;
@@ -57,7 +57,7 @@ void rdbEncodeHashtableRange(void *arg) {
     bool range_finished = false;
     while (!range_finished) {
         // Loop Phase 1: Wait for buffer to be FREE
-        serverLog(LL_NOTICE, "Thread: %d trying to get mutex", tid);
+        // serverLog(LL_NOTICE, "Thread: %d trying to get mutex", tid);
         pthread_mutex_lock(&wb->buffer_mutex);
         while(atomic_load(&wb->buffer_status) != BUFFER_FREE) {
             serverLog(LL_NOTICE, "Thread: %d is waiting for free buffer", tid);
@@ -88,13 +88,14 @@ void rdbEncodeHashtableRange(void *arg) {
             /* In fork child process, we can try to release memory back to the
             * OS and possibly avoid or decrease COW. We give the dismiss
             * mechanism a hint about an estimated size of the object we stored. */
-            size_t dump_size = wb->rio.processed_bytes - rdb_bytes_before_key;
-            if (server.in_fork_child) dismissObject(o, dump_size);
+            // size_t dump_size = wb->rio.processed_bytes - rdb_bytes_before_key;
+            // if (server.in_fork_child) dismissObject(o, dump_size);
             
             // WILL NEED TO UPDATE THIS LATER.. 1 thread should do the update!
             /* Update child info every 1 second (approximately).
             * in order to avoid calling mstime() on each iteration, we will
             * check the diff every 1024 keys */
+            // key_counter++ // atomic...
             // if (((*key_counter)++ & 1023) == 0) {
             //     long long now = mstime();
             //     if (now - info_updated_time >= 1000) {
@@ -109,13 +110,14 @@ void rdbEncodeHashtableRange(void *arg) {
         } // End of inner loop (filling buffer)
 
         // Phase 3: Signal to main thread that the buffer is READY (if there is data)
-        pthread_mutex_lock(&wb->buffer_mutex);
         if (wb->rio.processed_bytes > 0) { // Send signal if there is data
             atomic_store(&wb->buffer_status, BUFFER_READY);
             pthread_cond_signal(&wb->buffer_cond);
-            serverLog(LL_DEBUG, "Thread %d: Buffer ready (size %zu), signaled main thread.", tid, wb->rio.processed_bytes);
+            // serverLog(LL_DEBUG, "Thread %d: Buffer ready (size %zu), signaled main thread.", tid, wb->rio.processed_bytes);
         }
+        pthread_mutex_unlock(&wb->buffer_mutex);
+
     }
     atomic_store(&args->is_done, true); // Mark this worker as done
-    serverLog(LL_NOTICE, "Thread ID %d: Entire bucket range [%d, %d) processed.", tid, start_index, end_index);
+    // serverLog(LL_NOTICE, "Thread ID %d: Entire bucket range [%d, %d) processed.", tid, start_index, end_index);
 }

@@ -59,6 +59,8 @@
         "stdlib.h": "c",
         "thread_pool.h": "c",
         "rdb_save_thread.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "connhelpers.h": "c",
+        "util.h": "c"
     }
 }
