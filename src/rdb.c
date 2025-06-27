@@ -1477,6 +1477,17 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     written += res;
     if ((res = rdbSaveLen(rdb, expires_size)) < 0) goto werr;
     written += res;
+    
+    serverLog(LL_NOTICE, "rdb_snapshot_Threads = %d", server.rdb_snapshot_threads);
+    if (server.rdb_snapshot_threads > 1) {
+        long long save_start_us = ustime();
+        rdbSaveHashtablesMultithreaded(rdb, db, dbid, server.rdb_snapshot_threads, key_counter, pname);
+        long long save_end_us = ustime();
+        long long save_duration_us = save_end_us - save_start_us;
+
+        serverLog(LL_NOTICE, "RDB Save finished at %lldus. Total duration: %lldus", save_end_us, save_duration_us);
+        return 10;
+    }
 
     kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
     int last_slot = -1;
