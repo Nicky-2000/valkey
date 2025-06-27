@@ -61,6 +61,8 @@
         "rdb_save_thread.h": "c",
         "string.h": "c",
         "connhelpers.h": "c",
-        "util.h": "c"
+        "util.h": "c",
+        "sha1.h": "c",
+        "valkeymodule.h": "c"
     }
 }
