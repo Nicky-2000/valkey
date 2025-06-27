@@ -48,6 +48,9 @@ void kvstoreIteratorRelease(kvstoreIterator *kvs_it);
 int kvstoreIteratorGetCurrentHashtableIndex(kvstoreIterator *kvs_it);
 int kvstoreIteratorNext(kvstoreIterator *kvs_it, void **next);
 
+// NOTE INSTEAD OF MAKING THIS STATIC WE COULD USE a combo of kvstoreGetNextNonEmptyHashtableIndex() and kvstoreGetHashtable()
+hashtable *kvstoreIteratorNextHashtable(kvstoreIterator *kvs_it);
+
 /* Rehashing */
 void kvstoreTryResizeHashtables(kvstore *kvs, int limit);
 uint64_t kvstoreIncrementallyRehash(kvstore *kvs, uint64_t threshold_us);

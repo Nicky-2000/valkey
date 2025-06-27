@@ -122,6 +122,7 @@ size_t hashtableMemUsage(hashtable *ht);
 void hashtablePauseAutoShrink(hashtable *ht);
 void hashtableResumeAutoShrink(hashtable *ht);
 int hashtableIsRehashing(hashtable *ht);
+int hashtableRehashIndex(hashtable *ht);
 int hashtableIsRehashingPaused(hashtable *ht);
 void hashtableRehashingInfo(hashtable *ht, size_t *from_size, size_t *to_size);
 int hashtableRehashMicroseconds(hashtable *ht, uint64_t us);
@@ -157,6 +158,12 @@ void hashtableResetIterator(hashtableIterator *iter);
 hashtableIterator *hashtableCreateIterator(hashtable *ht, uint8_t flags);
 void hashtableReleaseIterator(hashtableIterator *iter);
 int hashtableNext(hashtableIterator *iter, void **elemptr);
+
+// Wrappers that allow us to initialize an iterator to start at a certain bucket index
+void hashtableInitRangeIterator(hashtableIterator *iterator, hashtable *ht, size_t start_logical_index);
+// Iterate to the next element in the hashtable. If we reach the end logical index bucket no element will be returned.
+int hashtableRangeNext(hashtableIterator *iterator, void **elemptr, size_t end_logical_index);
+
 
 /* Random entries */
 int hashtableRandomEntry(hashtable *ht, void **found);

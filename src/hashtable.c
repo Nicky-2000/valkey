@@ -1201,6 +1201,11 @@ int hashtableIsRehashing(hashtable *ht) {
     return ht->rehash_idx != -1;
 }
 
+/* Returns the Rehash Index of the hashtable */
+int hashtableRehashIndex(hashtable *ht) {
+    return ht->rehash_idx;
+}
+
 /* Provides the number of buckets in the old and new tables during rehashing. To
  * get the sizes in bytes, multiply by HASHTABLE_BUCKET_SIZE. This function can
  * only be used when rehashing is in progress, and from the rehashingStarted and
@@ -2028,6 +2033,93 @@ int hashtableNext(hashtableIterator *iterator, void **elemptr) {
         return 1;
     }
     return 0;
+}
+
+/* --- Hastable Iterator with Range */
+
+/**
+ * Initialize a range-based iterator for a hashtable starting from a logical live-bucket index.
+ *
+ * In rehashing mode, the live bucket space is a flattened view of:
+ *     tables[0][rehash_idx .. n0 - 1] followed by tables[1][0 .. n1 - 1]
+ * where n0 and n1 are the number of buckets in tables[0] and tables[1] respectively.
+ *
+ * This function maps a given logical start index into the correct physical table and index.
+ * 
+ * Behavior is undefined if `start_logical_index` is greater than or equal to the number of live buckets.
+ */
+void hashtableInitRangeIterator(hashtableIterator *iterator, hashtable *ht, size_t start_logical_index) {
+    iter *iter = iteratorFromOpaque(iterator);
+    iter->hashtable = ht;
+    iter->flags = 0;
+    iter->pos_in_bucket = 0;
+
+    size_t rehash_idx = hashtableIsRehashing(ht) ? hashtableRehashIndex(ht) : 0;
+    size_t n0 = numBuckets(iter->hashtable->bucket_exp[0]);
+    size_t n1 = numBuckets(iter->hashtable->bucket_exp[1]); 
+
+    size_t live_buckets_table_0 = (rehash_idx <= n0) ? (n0 - rehash_idx) : 0;
+    size_t total_live = live_buckets_table_0 + n1;
+
+    if (start_logical_index >= total_live) {
+        // Should throw ERROR?
+        return;
+    }
+
+    if (start_logical_index < live_buckets_table_0) {
+        // The range starts in tables[0]
+        iter->table = 0;
+        iter->index = rehash_idx + start_logical_index;
+    } else {
+        // The range starts in tables[1]
+        iter->table = 1;
+        iter->index = start_logical_index - live_buckets_table_0;
+    }
+
+    iter->bucket = &ht->tables[iter->table][iter->index];
+}
+
+/**
+ * Fetch the next entry within a logical range from a hashtable iterator.
+ *
+ * Iterates over a range of 'live' buckets across `tables[0]` and `tables[1]`.
+ * Stops when the logical index reaches `end_logical_index`, which should be based on
+ * the flattened view of live buckets:
+ *     tables[0][rehash_idx..n0-1] followed by tables[1][0..n1-1] (if rehashing).
+ *
+ * @param iterator             The initialized hashtable iterator.
+ * @param elemptr              Output pointer to the next entry (if found).
+ * @param end_logical_index    The *exclusive upper bound* on the logical bucket index.
+ * @return                     1 if an entry was found; 0 if end of range reached.
+ * 
+ * NOTE: This function relies on hashtableNext which has side effects. We will probably need a 
+ * better way to do this. 
+ */
+
+int hashtableRangeNext(hashtableIterator *iterator, void **elemptr, size_t end_logical_index) {
+    // Get the next element using hashtable next
+    void *next;
+    // Early return if there is no next element
+    if (!hashtableNext(iterator, &next)) return 0;
+
+    // Calculate the logical bucket that the next element is in
+    // This relies on hashtableNext setting the iter->table and iter->index values
+    iter *iter = iteratorFromOpaque(iterator);
+    size_t n0 = numBuckets(iter->hashtable->bucket_exp[0]);
+    size_t rehash_idx = hashtableIsRehashing(iter->hashtable) ? hashtableRehashIndex(iter->hashtable) : 0;
+    size_t live_buckets_table_0 = (rehash_idx <= n0) ? (n0 - rehash_idx) : 0; // Ensure n0-rehash_idx doesn't underflow
+    
+    size_t current_elem_logical_index;
+        if (iter->table == 0) {
+            current_elem_logical_index = (iter->index - rehash_idx);
+        } else { // iter->table == 1
+            current_elem_logical_index = live_buckets_table_0 + iter->index;
+        }
+    // Check that the bucket the 'next' element is in is within our bounds.
+    if (current_elem_logical_index >= end_logical_index) return 0;
+
+    *elemptr = next;
+    return 1;
 }
 
 /* --- Random entries --- */
