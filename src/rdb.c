@@ -1338,7 +1338,7 @@ werr:
     return -1;
 }
 
-static void processWorkerBuffers(rio *rdb, RdbSaveThreadArgs *threadArgs, int num_threads) {
+static void processWorkerBuffers(rio *rdb, RdbSaveThreadArgs *threadArgs, int num_threads, long long *info_updated_time, long *last_key_counter, char* pname) {
     bool all_workers_done_for_hashtable;
     bool any_buffer_ready_to_write;
 
@@ -1358,7 +1358,7 @@ static void processWorkerBuffers(rio *rdb, RdbSaveThreadArgs *threadArgs, int nu
             // serverLog(LL_NOTICE, "Main Thread: got mutex for buffer: %d", i);
             if (atomic_load(&wb->buffer_status) == BUFFER_READY) {
                 any_buffer_ready_to_write = true;
-                // serverLog(LL_NOTICE, "Main Thread: Worker Buffer %d is READY with len %ld", i, sdslen(wb->rio.io.buffer.ptr));
+                serverLog(LL_NOTICE, "Main Thread: Worker Buffer %d is READY with len %ld", i, sdslen(wb->rio.io.buffer.ptr));
 
                 // Write out the workers buffer content to the main RDB file stream
                 size_t bytes_to_write = sdslen(wb->rio.io.buffer.ptr);
@@ -1376,17 +1376,25 @@ static void processWorkerBuffers(rio *rdb, RdbSaveThreadArgs *threadArgs, int nu
             }
             // serverLog(LL_NOTICE, "Main Thread: Releaseing mutex for buffer: %d", i);
             pthread_mutex_unlock(&wb->buffer_mutex);
-
-
-
         }
-        // serverLog(LL_NOTICE, "Main Thread: sleeping");
-        // usleep(50000);
-        // serverLog(LL_NOTICE, "Main Thread: awake");
-        // if (!any_buffer_ready_to_write && !all_workers_done_for_hashtable) {
-             // Sleep for 1ms
-        // }
-        // CAN ADD SOME SLEEP HERE IF WE ARE BUSY WAITING TOO MUCH
+        long total_keys_processed = 0;
+        for (int i = 0; i < num_threads; i++) {
+            long keys_processed_by_thread = atomic_load(&threadArgs[i].keys_processed);
+            total_keys_processed += keys_processed_by_thread;
+        }
+        /* Update child info every 1 second (approximately).
+        * in order to avoid calling mstime() on each iteration, we will
+        * check the diff every 1024 keys */
+        if ((total_keys_processed - *last_key_counter) > 1023) {
+            long long now = mstime();
+            if (now - *info_updated_time >= 1000) {
+                // Update the key counter and notify the parent process
+                *last_key_counter = total_keys_processed;
+                sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, *last_key_counter, pname);
+                *info_updated_time = now;
+            }
+        }
+
     } while (!all_workers_done_for_hashtable || any_buffer_ready_to_write);
     // This loop continues as long as:
     // 1: There is at least one worker with 'is_done' = False (i.e still processing data)
@@ -1394,34 +1402,20 @@ static void processWorkerBuffers(rio *rdb, RdbSaveThreadArgs *threadArgs, int nu
 }
 
 
-void rdbSaveHashtablesMultithreaded(rio *rdb, serverDb *db, int dbid, int num_threads) {
+void rdbSaveHashtablesMultithreaded(rio *rdb, serverDb *db, int dbid, int num_threads, long *key_counter, char* pname) {
+    long long info_updated_time = 0;
     // Step 1: Create the thread pool
     threadPool *pool = threadPoolCreate(num_threads);
 
     // Step 2: Create the base tasks that will be passed to the threads
-    RdbSaveThreadArgs *threadArgs = zcalloc(num_threads * sizeof(RdbSaveThreadArgs));
-    WorkerBuffer *worker_buffers = zcalloc(num_threads * sizeof(WorkerBuffer));
-    for (int i = 0; i < num_threads; i++) {
-        threadArgs[i].thread_id = i;
-        threadArgs[i].num_threads = num_threads;
-        threadArgs[i].dbid = dbid;
-        threadArgs[i].worker_buffer = &worker_buffers[i];
+    RdbSaveThreadArgs *threadArgs = createRdbSaveThreadArgs(num_threads, dbid);
 
-        // Initialize WorkerBuffer's sds_buffer, mutex, cond, and rio_instance once ---
-        // worker_buffers[i].sds_buffer = sdsempty();                  // Initialize empty sds for the buffer
-        atomic_init(&worker_buffers[i].buffer_status, BUFFER_FREE); // Set initial status to FREE
-        pthread_mutex_init(&worker_buffers[i].buffer_mutex, NULL);
-        pthread_cond_init(&worker_buffers[i].buffer_cond, NULL);
-        rioInitWithBuffer(&worker_buffers[i].rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_SIZE)); // Initialize rio
-    }
-
-    // Step 3: Iterate through the hashtables in the kvstore
-    // If we are in standalone mode there will only be 1 hashtable
+    // Step 3: Iterate through the hashtables (slots) in the kvstore (in standalone mode there is 1 hashtable)
     kvstoreIterator *kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
     hashtable *ht;
     int last_slot = -1;
     while ((ht = kvstoreIteratorNextHashtable(kvs_it)) != NULL) {
-        // Step 3: For each hashtable, write the metadata to the RDB file (if we are in cluster mode)
+        // Step 3a: For each hashtable, write the metadata to the RDB file (if we are in cluster mode)
         int curr_slot = kvstoreIteratorGetCurrentHashtableIndex(kvs_it);
         if (server.cluster_enabled && curr_slot != last_slot) {
             // serverLog(LL_NOTICE, "Main Thread: Processing Slot %d", curr_slot);
@@ -1433,31 +1427,30 @@ void rdbSaveHashtablesMultithreaded(rio *rdb, serverDb *db, int dbid, int num_th
             last_slot = curr_slot;
         }
 
-        // Step 4: Update the tasks so they include the correct hashtable
+        // Step 3b: Reset the thread tasks and update the hashtable pointer
         for (int i = 0; i < num_threads; i++) {
-            threadArgs[i].ht = ht;
-            atomic_store(&threadArgs[i].is_done, false);         // Reset done flag for new task batch
-            pthread_mutex_lock(&worker_buffers[i].buffer_mutex); // Use correct mutex name
-            sdsclear(worker_buffers[i].rio.io.buffer.ptr);
-            worker_buffers[i].rio.processed_bytes = 0;
-            atomic_store(&worker_buffers[i].buffer_status, BUFFER_FREE);
-            pthread_mutex_unlock(&worker_buffers[i].buffer_mutex); // Use correct mutex name
-            threadPoolAddTask(pool, rdbEncodeHashtableRange, &threadArgs[i]);
+            RdbSaveThreadArgs *ta = &threadArgs[i];
+            WorkerBuffer *wb = ta->worker_buffer;
+            pthread_mutex_lock(&wb->buffer_mutex);
+            ta->ht = ht; // Update hashtable pointer
+            // Calculate the bucket range for this task
+            ta->bucket_range = calculateBucketRangeForThread(ht, num_threads, i);
+            atomic_store(&ta->is_done, false); // Mark task as not done
+            sdsclear(wb->rio.io.buffer.ptr);   // Make sure the buffer is clear
+            wb->rio.processed_bytes = 0;
+            atomic_store(&wb->buffer_status, BUFFER_FREE);
+            pthread_mutex_unlock(&wb->buffer_mutex);
+            threadPoolAddTask(pool, rdbEncodeHashtableRange, ta);
         }
-        // serverLog(LL_NOTICE, "Submitted %d tasks for hashtable.", num_threads);
-        processWorkerBuffers(rdb, threadArgs, num_threads);
-        // serverLog(LL_NOTICE, "All tasks for hashtable moving onto next one.");
+        // Step 3c: Poll the threads buffers and write them out to rdb file
+        // Once the hash table has been written out entirely we will continue to the next iteration
+        processWorkerBuffers(rdb, threadArgs, num_threads, &info_updated_time, key_counter, pname);
     }
-    // --- Final cleanup after all hashtables are processed ---
-    for (int i = 0; i < num_threads; i++) {
-        pthread_mutex_destroy(&worker_buffers[i].buffer_mutex);
-        pthread_cond_destroy(&worker_buffers[i].buffer_cond);
-        sdsfree(worker_buffers[i].rio.io.buffer.ptr);
-    }
-    zfree(worker_buffers);
+
+    // Step 4: Clean up the iterator, thread pool and tasks.
     kvstoreIteratorRelease(kvs_it);
-    zfree(threadArgs);
     threadPoolDestroy(pool);
+    freeRdbSaveThreadArgs(num_threads, threadArgs);
     serverLog(LL_NOTICE, "rdbSaveHashtablesMultithreaded completed all hashtables and cleaned up resources.");
 }
 
@@ -1491,7 +1484,7 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     serverLog(LL_NOTICE, "rdb_snapshot_Threads = %d", server.rdb_snapshot_threads);
     if (server.rdb_snapshot_threads > 1) {
         long long save_start_us = ustime();
-        rdbSaveHashtablesMultithreaded(rdb, db, dbid, server.rdb_snapshot_threads);
+        rdbSaveHashtablesMultithreaded(rdb, db, dbid, server.rdb_snapshot_threads, key_counter, pname);
         long long save_end_us = ustime();
         long long save_duration_us = save_end_us - save_start_us;
 

@@ -15,11 +15,10 @@
 #define WORKER_BUFFER_SIZE 16 * (1024*1024) // 16MB Buffer
 
 typedef struct {
-    rio rio; // Embedded rio structs for in-memory buffering
-    // sds sds_buffer; // sds string for each rio buffer
-    atomic_int buffer_status; // Indicates if the buffer can be read/written 
-    pthread_mutex_t buffer_mutex; // Protects access to status
-    pthread_cond_t buffer_cond; // For signaling between worker and main thread about buffer status
+    rio rio;                        // rio structs for in-memory buffering
+    atomic_int buffer_status;       // Indicates if the buffer can be read/written 
+    pthread_mutex_t buffer_mutex;   // Protects the status and rio buffer
+    pthread_cond_t buffer_cond;     // For signaling between worker and main thread about buffer status
 } WorkerBuffer;
 
 typedef struct {
@@ -34,10 +33,16 @@ typedef struct {
     hashtable *ht;
     BucketRange bucket_range;
     WorkerBuffer *worker_buffer;
-    atomic_int bucket_range;
+    atomic_long keys_processed; // Counter for keys processed.
     atomic_bool is_done; // Worker's overall completion status for the batch
 } RdbSaveThreadArgs;
 
+// Allocates and initializes RdBSaveThreadArgs that are processed by to rdbEncodeHashtableRange()
+RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid);
+void freeRdbSaveThreadArgs(int num_threads, RdbSaveThreadArgs *threadArgs);
+
+BucketRange calculateBucketRangeForThread(hashtable * ht, int num_threads, int thread_id);
+// Thread Function that serializes data in bucket range
 void rdbEncodeHashtableRange(void *arg);
 
 #endif /* RDB_SAVE_THREAD_H */
