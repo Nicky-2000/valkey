@@ -32,7 +32,6 @@ threadPool *threadPoolCreate(int num_threads);
  */
 int threadPoolAddTask(threadPool *pool, void (*func)(void *), void *arg);
 
-
 /** Wait for all currently added tasks to complete.
  * This function BLOCKS until 'active_tasks' is 0
  * Note: This does not destroy the pool.
@@ -40,9 +39,8 @@ int threadPoolAddTask(threadPool *pool, void (*func)(void *), void *arg);
 void threadPoolWaitAll(threadPool *pool);
 
 /* Non-blocking check to see if all currently added tasks are done.
- * Returns true if all tasks are complete (active_task is 0), false otherwise. */
+ * Returns true if all tasks are complete (active_tasks is 0), false otherwise. */
 bool threadPoolAreAllTasksDone(threadPool *pool);
-
 
 /** Gracefully shutdown the thread pool.
  * This signals the pool to stop accepting new tasks, waits for all

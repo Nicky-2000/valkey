@@ -162,7 +162,9 @@ int hashtableNext(hashtableIterator *iter, void **elemptr);
 // Wrappers that allow us to initialize an iterator to start at a certain bucket index
 void hashtableInitRangeIterator(hashtableIterator *iterator, hashtable *ht, size_t start_logical_index);
 // Iterate to the next element in the hashtable. If we reach the end logical index bucket no element will be returned.
-int hashtableRangeNext(hashtableIterator *iterator, void **elemptr, size_t end_logical_index);
+int hashtableRangeNext(hashtableIterator *iterator, void **elemptr, size_t start_logical_index, size_t end_logical_index);
+void hashtablePauseRehashing(hashtable *ht);
+void hashtableResumeRehashing(hashtable *ht);
 
 
 /* Random entries */

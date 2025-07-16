@@ -13,7 +13,7 @@
 #define BUFFER_READY 1
 
 
-#define WORKER_BUFFER_SIZE 16 * (1024*1024) // 16MB Buffer
+#define WORKER_BUFFER_SIZE  4*(1024*1024) // 16MB Buffer
 
 typedef struct {
     rio rio;                        // rio structs for in-memory buffering

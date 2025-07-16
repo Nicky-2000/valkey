@@ -89,7 +89,7 @@ void rdbEncodeHashtableRange(void *arg) {
 
     // Step 2: Iterate over all the elements in the hashtable bucket range
     hashtableIterator ht_iter;
-    hashtableInitRangeIterator(&ht_iter, ht, range.start_index);
+    hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_PREFETCH_VALUES);
     void *next;
 
     // Make sure is_done is set to false
@@ -100,14 +100,14 @@ void rdbEncodeHashtableRange(void *arg) {
         // Loop Phase 1: Wait for buffer to be FREE
         pthread_mutex_lock(&wb->buffer_mutex);
         while (atomic_load(&wb->buffer_status) != BUFFER_FREE) {
-            serverLog(LL_NOTICE, "Thread: %d is waiting for free buffer", tid);
+            // serverLog(LL_NOTICE, "Thread: %d is waiting for free buffer", tid);
             pthread_cond_wait(&wb->buffer_cond, &wb->buffer_mutex);
         }
         // Loop Phase 2: Fill the buffer with keys from the assigned range.
         // NOTE: The main thread has cleared the buffer so we do not need to do that
         bool buffer_filled_to_threshold = false;
         while (!buffer_filled_to_threshold && !range_finished) {
-            if (hashtableRangeNext(&ht_iter, &next, range.end_index) == 0) {
+            if (hashtableRangeNext(&ht_iter, &next, range.start_index, range.end_index) == 0) {
                 range_finished = true;
                 break;
             }
@@ -135,14 +135,14 @@ void rdbEncodeHashtableRange(void *arg) {
             size_t dump_size = wb->rio.processed_bytes - rdb_bytes_before_key;
             if (server.in_fork_child) dismissObject(o, dump_size);
 
-
-            if (wb->rio.processed_bytes >= (WORKER_BUFFER_SIZE)) {
+            unsigned long long threshold = (unsigned long long)WORKER_BUFFER_SIZE * 9 / 10;
+            if (wb->rio.processed_bytes >= threshold) {
                 buffer_filled_to_threshold = true;
             }
 
-            serverLog(LL_NOTICE, "Thread: %d saving key: %s, res =%ld", tid, keystr, res);
+            // serverLog(LL_NOTICE, "Thread: %d saving key: %s, res =%ld", tid, keystr, res);
             size_t processed_bytes_after = wb->rio.processed_bytes;
-            serverLog(LL_NOTICE, "Thread: %d rdb_bytes_before_key: %lu, wb->rio.processed_bytes: %lu", tid, rdb_bytes_before_key, processed_bytes_after);
+            // serverLog(LL_NOTICE, "Thread: %d rdb_bytes_before_key: %lu, wb->rio.processed_bytes: %lu", tid, rdb_bytes_before_key, processed_bytes_after);
 
         } // End of inner loop (filling buffer)
 
@@ -150,10 +150,14 @@ void rdbEncodeHashtableRange(void *arg) {
         if (wb->rio.processed_bytes > 0) { // Send signal if there is data
             atomic_store(&wb->buffer_status, BUFFER_READY);
             pthread_cond_signal(&wb->buffer_cond);
-            serverLog(LL_DEBUG, "Thread %d: Buffer ready (size %zu), signaled main thread.", tid, wb->rio.processed_bytes);
+            // serverLog(LL_DEBUG, "Thread %d: Buffer ready (size %zu), signaled main thread.", tid, wb->rio.processed_bytes);
         }
         pthread_mutex_unlock(&wb->buffer_mutex);
     }
+    pthread_mutex_lock(&wb->buffer_mutex);
+    // serverLog(LL_NOTICE, "Thread ID %d wrote %lu keys out", tid, args->keys_processed);
+    pthread_mutex_unlock(&wb->buffer_mutex);
+
     atomic_store(&args->is_done, true); // Mark this worker as done
     // serverLog(LL_NOTICE, "Thread ID %d: Entire bucket range [%d, %d) processed.", tid, start_index, end_index);
 }
