@@ -5,6 +5,10 @@
 *.so
 *.d
 *.log
+/venv/
+/flamegraphs/
+/benchmarking_python_scripts/
+/__pycache__
 dump*.rdb
 *-benchmark
 *-check-aof
