@@ -1722,6 +1722,7 @@ struct valkeyServer {
     time_t loading_start_time;
     off_t loading_process_events_interval_bytes;
     time_t loading_process_events_interval_ms;
+    int rdb_threads_num; /* Number of threads to use for RDB Save and RDB Load. */
     /* Fields used only for stats */
     time_t stat_starttime;                         /* Server start time */
     long long stat_numcommands;                    /* Number of processed commands */

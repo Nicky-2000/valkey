@@ -43,6 +43,7 @@
 #include "bio.h"
 #include "zmalloc.h"
 #include "module.h"
+#include "rdb_threads.h"
 
 #include <math.h>
 #include <fcntl.h>
@@ -1437,12 +1438,22 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     /* save functions */
     if (!(req & REPLICA_REQ_RDB_EXCLUDE_FUNCTIONS) && rdbSaveFunctions(rdb) == -1) goto werr;
+    
+    /* Start the RDB Threads that will be used for Saving*/
+    if (server.rdb_threads_num > 1) {
+        initRDBThreads(1); // For saving each thread will only have one task at a time 
+    }
 
     /* save all databases, skip this if we're in functions-only mode */
     if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA)) {
         for (j = 0; j < server.dbnum; j++) {
             if (rdbSaveDb(rdb, j, rdbflags, &key_counter) == -1) goto werr;
         }
+    }
+    
+    /* Kill the RDB threads if they were initialized*/
+    if (server.rdb_threads_num > 1) {
+        killRDBThreads();
     }
 
     if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_AFTER_RDB) == -1) goto werr;
