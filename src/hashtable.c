@@ -1226,6 +1226,11 @@ int hashtableIsRehashing(hashtable *ht) {
     return ht->rehash_idx != -1;
 }
 
+/* Returns the Rehash Index of the hashtable */
+int hashtableRehashIndex(hashtable *ht) {
+    return ht->rehash_idx;
+}
+
 /* Provides the number of buckets in the old and new tables during rehashing. To
  * get the sizes in bytes, multiply by HASHTABLE_BUCKET_SIZE. This function can
  * only be used when rehashing is in progress, and from the rehashingStarted and
@@ -2068,6 +2073,125 @@ int hashtableNext(hashtableIterator *iterator, void **elemptr) {
             continue;
         }
         if (!(iter->flags & HASHTABLE_ITER_SKIP_VALIDATION) && !validateElementIfNeeded(iter->hashtable, b->entries[iter->pos_in_bucket])) {
+            continue;
+        }
+        /* Return the entry at this position. */
+        if (elemptr) {
+            *elemptr = b->entries[iter->pos_in_bucket];
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* --- Hastable Iterator with Range */
+
+static void logicalBucketIndexToActualBucketIndex(hashtable* ht, size_t logical_index, uint8_t* table_index, long* bucket_index){
+    size_t rehash_idx = hashtableIsRehashing(ht) ? hashtableRehashIndex(ht) : 0;
+    size_t n0 = numBuckets(ht->bucket_exp[0]);
+    size_t n1 = numBuckets(ht->bucket_exp[1]); 
+
+    size_t live_buckets_table_0 = (rehash_idx <= n0) ? (n0 - rehash_idx) : 0;
+    size_t total_live = live_buckets_table_0 + n1;
+
+    assert(logical_index <= total_live); // We should not try to convert a logical index that is out of bounds
+
+    if (logical_index <= live_buckets_table_0) {
+        // The range starts in tables[0]
+        *table_index = 0;
+        *bucket_index = rehash_idx + logical_index;
+    } else {
+        // The range starts in tables[1]
+        *table_index = 1;
+        *bucket_index = logical_index - live_buckets_table_0;
+    }
+}
+
+/**
+ * Fetch the next entry within a logical range from a hashtable iterator.
+ *
+ * Iterates over a range of 'live' buckets across `tables[0]` and `tables[1]`.
+ * Stops when the logical index reaches `end_logical_index`, which should be based on
+ * the flattened view of live buckets:
+ *     tables[0][rehash_idx..n0-1] followed by tables[1][0..n1-1] (if rehashing).
+ *
+ * @param iterator             The initialized hashtable iterator.
+ * @param elemptr              Output pointer to the next entry (if found).
+ * @param end_logical_index    The *exclusive upper bound* on the logical bucket index.
+ * @return                     1 if an entry was found; 0 if end of range reached.
+ * 
+ * NOTE: This function relies on hashtableNext which has side effects. We will probably need a 
+ * better way to do this. 
+ */
+
+int hashtableRangeNext(hashtableIterator *iterator, void **elemptr, size_t start_logical_index, size_t end_logical_index) {
+    iter *iter = iteratorFromOpaque(iterator);
+    uint8_t start_table_index;
+    long start_bucket_index;
+    logicalBucketIndexToActualBucketIndex(iter->hashtable, start_logical_index, &start_table_index, &start_bucket_index);
+
+    uint8_t end_table_index;
+    long end_bucket_index;
+    logicalBucketIndexToActualBucketIndex(iter->hashtable, end_logical_index, &end_table_index, &end_bucket_index);
+
+    // serverLog(LL_NOTICE, "hashtableRangeNext: (start_table_index, start_bucket_index): (%u, %lu), (end_table_index, end_bucket_index): (%u, %lu)", start_table_index, start_bucket_index, end_table_index, end_bucket_index);
+    while (1) {
+
+        if (iter->index == -1 && iter->table == 0) {
+            // serverLog(LL_NOTICE, "First call to iterator: (start_table, start_bucket): (%u, %lu), (end_table, end_bucket): (%u, %lu)", start_table_index, start_bucket_index, end_table_index, end_bucket_index);
+            /* It's the first call to next. */
+            if (iter->hashtable->tables[iter->table] == NULL) {
+                // serverLog(LL_NOTICE ,"Empty Hashtable!! Ending");
+
+                /* Empty hashtable. We're done. */
+                break;
+            }
+            iter->table = start_table_index;
+            iter->index = start_bucket_index;
+            iter->bucket = &iter->hashtable->tables[iter->table][iter->index];
+            iter->pos_in_bucket = 0;
+        } else {
+            /* Advance to the next position within the bucket, or to the next
+             * child bucket in a chain, or to the next bucket index, or to the
+             * next table. */
+            iter->pos_in_bucket++;
+            if (iter->bucket->chained && iter->pos_in_bucket >= ENTRIES_PER_BUCKET - 1) {
+                iter->pos_in_bucket = 0;
+                iter->bucket = getChildBucket(iter->bucket);
+            } else if (iter->pos_in_bucket >= ENTRIES_PER_BUCKET) {
+                /* Bucket index done. */
+                iter->pos_in_bucket = 0;
+                iter->index++;
+
+                if ((size_t)iter->index >= numBuckets(iter->hashtable->bucket_exp[iter->table])) {
+                    if (hashtableIsRehashing(iter->hashtable) && iter->table == 0) {
+                        iter->index = 0;
+                        iter->table++;
+                    } else {
+                        /* Done. */
+                        break;
+                    }
+                }
+
+                iter->bucket = &iter->hashtable->tables[iter->table][iter->index];
+            }
+        }
+        // // Check if we are done our range!
+        if (iter->table >= end_table_index && iter->index >= end_bucket_index) {
+            // serverLog(LL_NOTICE, "Finished Range: (curr_table, curr_bucket): (%u, %lu), (end_table, end_bucket): (%u, %lu)", iter->table, iter->index, end_table_index, end_bucket_index);
+            // We are out of our index
+            break;
+        }
+
+        bucket *b = iter->bucket;
+        if (iter->pos_in_bucket == 0) {
+            if (shouldPrefetchValues(iter)) {
+                prefetchBucketValues(b, iter->hashtable);
+            }
+            prefetchNextBucketEntries(iter, b);
+        }
+        if (!isPositionFilled(b, iter->pos_in_bucket)) {
+            /* No entry here. */
             continue;
         }
         /* Return the entry at this position. */

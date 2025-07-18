@@ -1374,6 +1374,11 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     if ((res = rdbSaveLen(rdb, expires_size)) < 0) goto werr;
     written += res;
 
+    if (server.rdb_threads_num > 1) {
+        written += rdbSaveDbMultiThreaded(rdb, dbid, key_counter, pname);
+        return written;
+    }
+
     kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
     int last_slot = -1;
     /* Iterate this DB writing every entry */
@@ -1453,7 +1458,8 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     
     /* Start the RDB Threads that will be used for Saving*/
     if (server.rdb_threads_num > 1) {
-        initRDBThreads(1); // For saving each thread will only have one task at a time 
+        serverLog(LL_NOTICE, "Starting RDB Threads");
+        initRDBThreads(2); // For saving each thread will only have one task at a time 
     }
 
     /* save all databases, skip this if we're in functions-only mode */
@@ -1465,7 +1471,10 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     
     /* Kill the RDB threads if they were initialized*/
     if (server.rdb_threads_num > 1) {
+        serverLog(LL_NOTICE, "Killing RDB Threads");
         killRDBThreads();
+        serverLog(LL_NOTICE, "RDB Threads Killed");
+
     }
 
     if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_AFTER_RDB) == -1) goto werr;
