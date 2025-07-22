@@ -90,7 +90,8 @@ static void shutdownRDBThread(int id) {
     int err;
     pthread_t tid = rdb_threads[id];
     if (tid == pthread_self()) return;
-    if (tid == 0) return;
+    if (tid == 0) return;    
+    pthread_mutex_unlock(&rdb_threads_mutex[id]);
 
     pthread_cancel(tid);
 
