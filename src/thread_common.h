@@ -4,21 +4,21 @@
 #include "server.h"
 
 
-/* Define a thread-local integer to store each thread's unique ID.
+/* thread-local integer to store each thread's unique ID.
  * The main thread will have ID 0. Other worker threads will be assigned
- * unique, non-zero IDs by their respective thread pool managers.*/
+ * unique, non-zero IDs by their respective thread pool managers (see io_threads.c and rdb_threads.c).*/
 extern __thread int thread_id;
 
-/* Checks if the currently executing code is running on the main thread.
- * Returns 1 (true) if it's the main thread, 0 (false) otherwise. */
+
+/* Returns 1 (true) if it's the main thread, 0 (false) otherwise. */
 int inMainThread(void);
 
-/* Retrieves the ID of the currently executing thread.
- * Returns 0 for the main thread, and the assigned ID for worker threads. */
+
+/* Returns 0 for the main thread, and the assigned ID for worker threads. */
 int getThreadID(void);
 
 
-/* --- Generic Job Queue Definitions --- Used to send jobs from the main-thread to the worker threads (IO Thread or RDB Thread).*/
+/* --- Job Queue Definitions --- Used to send jobs from the main-thread to the worker threads (IO Thread or RDB Thread).*/
 typedef void (*job_handler)(void *);
 
 typedef struct job {
