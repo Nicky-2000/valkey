@@ -9,8 +9,7 @@
 
 static pthread_t rdb_threads[RDB_THREADS_MAX_NUM] = {0};
 static pthread_mutex_t rdb_threads_mutex[RDB_THREADS_MAX_NUM];
-// Job queues for each RDB worker thread.
-JobQueue rdb_jobs[RDB_THREADS_MAX_NUM] = {0};
+JobQueue rdb_jobs[RDB_THREADS_MAX_NUM] = {0}; // Job queues for each RDB worker thread.
 
 
 /* --------- RDB Worker Threads Core Logic --------- */
