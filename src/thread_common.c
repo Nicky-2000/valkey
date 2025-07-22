@@ -8,6 +8,7 @@
 
 __thread int thread_id = 0; /*Thread local var*/
 
+
 int inMainThread(void) {
     return thread_id == 0;
 }
