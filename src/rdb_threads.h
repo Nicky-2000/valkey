@@ -4,39 +4,40 @@
 #include "server.h"
 #include "thread_common.h"
 
-#define BUFFER_FREE 0
-#define BUFFER_READY 1
+/* Threshold for flushing a worker's buffer to the main RDB file (16MB). */
+#define WORKER_BUFFER_DEFAULT_SIZE  16*(1024*1024)      
+/* Maximum capacity for a worker's buffer. Keys causing this limit to be exceeded are streamed directly to RDB file (64MB). */
+#define WORKER_BUFFER_CAPACITY_LIMIT 64*(1024*1024)
 
+#define RDB_SAVE_JOB_QUEUE_SIZE 2 // Minimum size of JobQueue
 
-#define WORKER_BUFFER_SIZE  16*(1024*1024) // 16MB Buffer
+typedef struct RdbSaveThreadArgs RdbSaveThreadArgs; 
 
-typedef struct {
-    rio rio;                        // rio structs for in-memory buffering
-    atomic_int buffer_status;       // Indicates if the buffer can be read/written 
-    pthread_mutex_t buffer_mutex;   // Protects the status and rio buffer
-    pthread_cond_t buffer_cond;     // For signaling between worker and main thread about buffer status
-} RdbSaveWorkerBuffer;
+/* Describes a range buckets in a hashtable for a thread to process. */
+typedef struct BucketStride {
+    size_t start_index; // First logical bucket index for this thread
+    size_t stride_size; // Step size to find the next logical bucket (typically num_worker_threads)
+} BucketStride;
 
-// NOTE: The next iteration will use a mod operation to assign threads buckets. So this will change.
-// The changed version will be something along the lines of 
-/*
-typedef struct {
-    int start_index;
-    int jump_size; Jump size would just be the num_worker_threads
-} BucketRange;
-*/
-typedef struct {
-    int start_index;
-    int end_index;
-} BucketRange;
+/* Info needed by main thread for reporting save progress*/
+typedef struct MainThreadRdbInfo {
+    RdbSaveThreadArgs* threadArgs;
+    long *last_key_counter;
+    long long *info_updated_time;
+    char *pname;
+} MainThreadRdbInfo;
 
-typedef struct {
-    int dbid;
-    hashtable *ht;                  // The hashtable this with buckets for this thread to process
-    BucketRange bucket_range;       // The logical range of buckets this thread is responsible for processing
-    RdbSaveWorkerBuffer *worker_buffer;    // Buffer to output the key/values in encoded RDB format
-    atomic_long keys_processed;     
-    atomic_bool is_done;
+typedef struct RdbSaveThreadArgs {
+    int dbid;                           // Database ID being saved
+    hashtable *ht;                      // hashtable to be saved
+    BucketStride bucket_stride;         // Defines what buckets in a hashtable the thread is responsible for
+    atomic_long keys_processed;
+    ssize_t bytes_written;
+    rio memcap_buffer_rio;              // In-memory buffer (with max capacity) for key serialization
+    rio *rdb;                           // Pointer to the main RDB file I/O object
+    pthread_mutex_t *write_mutex;       // Mutex protecting access to *rdb
+    int save_status;
+    MainThreadRdbInfo* main_thread_report_info; // Reporting info (only set for main thread's args)
 } RdbSaveThreadArgs;
 
 
@@ -44,6 +45,5 @@ void initRDBThreads(int per_thread_queue_size);
 void killRDBThreads(void);
 
 ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pname);
-
 
 #endif // __RDB_THREADS_H__
