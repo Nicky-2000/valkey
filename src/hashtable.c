@@ -323,6 +323,13 @@ typedef struct {
     uint16_t table_index;
 } position;
 
+/* Represents a specific bucket's location. Used by hashtableStrideNext. */
+typedef struct BucketLocation {
+    uint8_t table_index;
+    size_t bucket_index;
+    uint8_t valid;
+} BucketLocation;
+
 static_assert(sizeof(hashtablePosition) >= sizeof(position),
               "Opaque iterator size");
 
@@ -2085,12 +2092,10 @@ int hashtableNext(hashtableIterator *iterator, void **elemptr) {
 }
 
 /* --- Hastable Iterator with Range */
-typedef struct BucketLocation {
-    uint8_t table_index;
-    size_t bucket_index;
-    uint8_t valid;
-} BucketLocation;
 
+/* Converts a logical, global bucket index to its physical BucketLocation.
+ * This handles hashtables undergoing rehashing by mapping the logical index
+ * across `tables[0]` (unrehashed) and `tables[1]` (rehashed). */
 static BucketLocation logicalBucketIndexToBucketLocation(hashtable *ht, size_t logical_index) {
     size_t rehash_idx = hashtableIsRehashing(ht) ? hashtableRehashIndex(ht) : 0;
     size_t n0 = numBuckets(ht->bucket_exp[0]);
@@ -2102,19 +2107,21 @@ static BucketLocation logicalBucketIndexToBucketLocation(hashtable *ht, size_t l
     BucketLocation bucket_loc;
 
     if (logical_index >= total_live) {
-        // The logical_index exceeds the total number of live buckets
+        /* Logical index is out of bounds. */
         bucket_loc.table_index = 0; 
         bucket_loc.bucket_index = 0;
-        bucket_loc.valid = 0;
+        bucket_loc.valid = 0; /* This signals to hashtableStrideNext that we have finished the range */
         return bucket_loc;
     }
 
     if (logical_index < live_buckets_table_0) {
-        // The bucket is in tables[0]
+         /* Physical location for a bucket in tables[0] is at rehash_idx plus its logical offset.
+         * Example: if rehash_idx=3, logical_index=0 (1st live logical bucket) maps to tables[0][3]. */
         bucket_loc.table_index = 0;
         bucket_loc.bucket_index = rehash_idx + logical_index;
     } else {
-        // The bucket is in tables[1]
+        /* Physical location for a bucket in tables[1] is the logical index minus the number of live buckets in tables[0]
+         * Example: if live_buckets_table_0=5, logical_index=5 (1st logical bucket for tables[1]) maps to tables[1][0]. */
         bucket_loc.table_index = 1;
         bucket_loc.bucket_index = logical_index - live_buckets_table_0;
     }
@@ -2123,20 +2130,24 @@ static BucketLocation logicalBucketIndexToBucketLocation(hashtable *ht, size_t l
     return bucket_loc;
 }
 
+/* Converts a physical `BucketLocation` back to its logical, global bucket index.
+ * This is needed to 'stride' to the next bucket in hashtableStrideNext */
 static size_t BucketLocationToLogicalBucketIndex(hashtable *ht, BucketLocation bucket_loc) {
     assert(bucket_loc.table_index < 2); // valid table indices are 0 and 1
     size_t rehash_idx = hashtableIsRehashing(ht) ? hashtableRehashIndex(ht) : 0;
     size_t n0 = numBuckets(ht->bucket_exp[0]);
 
-    // Number of 'live' buckets in table[0] that haven't been rehashed yet.
+    /* Calculate the number of 'live' buckets in `tables[0]` that are still active. */
     size_t live_buckets_table_0 = (rehash_idx < n0) ? (n0 - rehash_idx) : 0;
 
     size_t logical_index;
     if (bucket_loc.table_index == 0) {
-        // If the bucket is in table[0], its logical index is its actual index minus the rehash_idx offset.
+        /* Logical index for a bucket in tables[0] is its bucket_index minus the rehash_idx.
+         * Example: if rehash_idx=3, physical tables[0][3] maps to logical_index=0. */
         logical_index = bucket_loc.bucket_index - rehash_idx;
     } else {
-        // If the bucket is in table[1], its logical index is its actual index plus the size of table[0]'s live buckets.
+        /* Logical index for a bucket in tables[1] is its bucket_index plus the number of live buckets in tables[0].
+         * Example: if live_buckets_table_0=5, physical tables[1][0] maps to logical_index=5. */
         logical_index = live_buckets_table_0 + bucket_loc.bucket_index;
     }
 
@@ -2144,23 +2155,61 @@ static size_t BucketLocationToLogicalBucketIndex(hashtable *ht, BucketLocation b
 }
 
 
-// This will get the next element in the bucket if it exsits. if not we will iterate to the next bucket
-//  by jumping bucket_stride.jump_size buckets forward in the table index
-int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t start_index, size_t stride) {
+/*
+ * Striding Iterator: How it Works
+ * -------------------------------
+ * Designed for threads to concurrently iterate interleaved sections of the hashtable,
+ * enabling parallel processing. Each thread fully processes a **complete bucket chain**
+ * before advancing by 'stride' to the next bucket.
+ *
+ * Imagine a logical sequence of buckets (B0, B1, B2, ...).
+ * If a bucket (e.g., B0) is full, it might "chain" to a child bucket (C0).
+ *
+ * Example (logical_start_index=0, stride=2):
+ *
+ * Logical Bucket Sequence:
+ * [B0] ------- [B1] ------- [B2] ------- [B3] ------- [B4] ------- [B5] ...
+ * |            |            |            |            |            |
+ * v            v            v            v            v            v
+ * (C0)         (C1)         (C2)         (C3)         (C4)         (C5)
+ * (Child       (Child       (Child       (Child       (Child       (Child
+ * Bucket)      Bucket)      Bucket)      Bucket)      Bucket)      Bucket)
+ *
+ * Iteration Flow for one thread (Each call returns ONE element):
+ *
+ * 1. Initial calls:
+ * - Successive calls return elements from [B0] until exhausted.
+ * - If [B0] is chained, subsequent calls return elements from (C0) until (C0) is exhausted.
+ * (At this point, B0's entire chain is processed.)
+ *
+ * 2. The NEXT call after B0's chain is exhausted:
+ * - STRIIDE! Jumps 2 logical buckets forward.
+ * - Starts returning elements from [B2].
+ * - If [B2] is chained, subsequent calls return elements from (C2).
+ * (At this point, B2's entire chain is processed.)
+ *
+ * 3. The NEXT call after B2's chain is exhausted:
+ * - STRIIDE! Jumps 2 logical buckets forward.
+ * - Starts returning elements from [B4].
+ * - If [B4] is chained, subsequent calls return elements from (C4).
+ * (At this point, B4's entire chain is processed.)
+ *
+ * This pattern continues until no more valid buckets are found within the stride.
+ */
+int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t logical_start_index, size_t stride) {
     iter *iter = iteratorFromOpaque(iterator);
 
-    // serverLog(LL_NOTICE, "hashtableRangeNext: (start_table_index, start_bucket_index): (%u, %lu), (end_table_index, end_bucket_index): (%u, %lu)", start_table_index, start_bucket_index, end_table_index, end_bucket_index);
     while (1) {
         if (iter->index == -1 && iter->table == 0) {
-            // serverLog(LL_NOTICE, "First call to iterator: (start_table, start_bucket): (%u, %lu), (end_table, end_bucket): (%u, %lu)", start_table_index, start_bucket_index, end_table_index, end_bucket_index);
             /* It's the first call to next. */
+            iter->fingerprint = hashtableFingerprint(iter->hashtable);
             if (iter->hashtable->tables[iter->table] == NULL) {
                 /* Empty hashtable. We're done. */
                 break;
             }
-            BucketLocation start_loc = logicalBucketIndexToBucketLocation(iter->hashtable, start_index);
+            BucketLocation start_loc = logicalBucketIndexToBucketLocation(iter->hashtable, logical_start_index);
             if (!start_loc.valid){
-                /* The start index is out of bounds*/
+                /* The start index is out of bounds. Nothing to process.*/
                 break;
             }
             iter->table = start_loc.table_index;
@@ -2169,30 +2218,30 @@ int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t star
             iter->pos_in_bucket = 0;
         } else {
             /* Advance to the next position within the bucket, or to the next
-             * child bucket in a chain, or to the next bucket index, or to the
-             * next table. */
+             * child bucket in a chain, or stride to the next bucket */
             iter->pos_in_bucket++;
             if (iter->bucket->chained && iter->pos_in_bucket >= ENTRIES_PER_BUCKET - 1) {
+                /* Current bucket is exhausted: move to the next bucket in its chain. */
                 iter->pos_in_bucket = 0;
                 iter->bucket = getChildBucket(iter->bucket);
             } else if (iter->pos_in_bucket >= ENTRIES_PER_BUCKET) {
-                /* Bucket index done. We need to stride to the next bucket*/
+                /* Current bucket (and its entire chain) is fully processed. Calculate the next logical bucket to stride to. */
                 BucketLocation curr_bucket_loc = {
                     .table_index = iter->table,
                     .bucket_index = iter->index
                 };
                 size_t curr_logical_index = BucketLocationToLogicalBucketIndex(iter->hashtable, curr_bucket_loc);
-                // Increment the logical index with the stride
                 size_t next_logical_index = curr_logical_index + stride;
-                // Convert logical index to BucketLocation
+
                 BucketLocation next_bucket_loc = logicalBucketIndexToBucketLocation(iter->hashtable, next_logical_index);
                 
                 if (next_bucket_loc.valid) {
+                    /* Found a valid next strided bucket. Update iterator state. */
                     iter->table = next_bucket_loc.table_index;
                     iter->index = next_bucket_loc.bucket_index;
                     iter->pos_in_bucket = 0;
                 } else {
-                    /* Done */
+                    /* Done. No more valid buckets are reachable within this stride's range. */
                     break;
                 }
                 iter->bucket = &iter->hashtable->tables[iter->table][iter->index];
@@ -2204,8 +2253,9 @@ int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t star
             if (shouldPrefetchValues(iter)) {
                 prefetchBucketValues(b, iter->hashtable);
             }
-            // Critical Issue: Right now this will be fine if we have a child bucket. 
-            // But it will not prefetch the correct bucket if we need to stride.
+            // TODO: Right now prefetchNextBucketEntries will be fine if we have a child bucket. 
+            // But it will not prefetch the correct bucket if we need to stride on the next iteration.
+            // Need to make this function stride aware. Or make a new version of the function entirely.
             prefetchNextBucketEntries(iter, b);
         }
         if (!isPositionFilled(b, iter->pos_in_bucket)) {
