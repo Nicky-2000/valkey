@@ -73,6 +73,13 @@ struct _rio {
 
     /* Backend-specific vars. */
     union {
+        /* In-memory buffer target with a maximum capacity. */
+        struct {
+            sds ptr;
+            off_t pos;
+            size_t buffer_limit_bytes;  /* Max capacity of buffer in Bytes */
+            uint8_t cap_reached;        /* set to 1 if buffer capacity was reached on last write */
+        } memcap_buffer;
         /* In-memory buffer target. */
         struct {
             sds ptr;
@@ -185,6 +192,7 @@ static inline void rioClearErrors(rio *r) {
 
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
+void rioInitWithMemCappedBuffer(rio *r, sds s, size_t buffer_limit_bytes);
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
 void rioInitWithFd(rio *r, int fd);
 

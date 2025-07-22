@@ -57,6 +57,60 @@
 #include "server.h"
 #include "connhelpers.h"
 
+/* ------------------------- Memory Capped Buffer I/O  ----------------------- */
+
+/* Returns 1 or 0 for success/failure. */
+static size_t rioMemCappedBufferWrite(rio *r, const void *buf, size_t len) {
+    if (((size_t)r->io.memcap_buffer.pos + len) > r->io.memcap_buffer.buffer_limit_bytes) {
+        r->io.memcap_buffer.cap_reached = 1; 
+        return 0; /* Return 0 (failure) if writing will cause us to exceed the buffer capacity */
+    }
+    r->io.memcap_buffer.ptr = sdscatlen(r->io.memcap_buffer.ptr, (char *)buf, len);
+    r->io.memcap_buffer.pos += len;
+    return 1;
+}
+
+/* Returns 1 or 0 for success/failure. */
+static size_t rioMemCappedBufferRead(rio *r, void *buf, size_t len) {
+    if (sdslen(r->io.memcap_buffer.ptr) - r->io.memcap_buffer.pos < len) return 0; /* not enough buffer to return len bytes. */
+    memcpy(buf, r->io.memcap_buffer.ptr + r->io.memcap_buffer.pos, len);
+    r->io.memcap_buffer.pos += len;
+    return 1;
+}
+
+/* Returns read/write position in buffer. */
+static off_t rioMemCappedBufferTell(rio *r) {
+    return r->io.memcap_buffer.pos;
+}
+
+/* Flushes any buffer to target device if applicable. Returns 1 on success
+ * and 0 on failures. */
+static int rioMemCappedBufferFlush(rio *r) {
+    UNUSED(r);
+    return 1; /* Nothing to do, our write just appends to the buffer. */
+}
+
+static const rio rioMemCappedBufferIO = {
+    rioMemCappedBufferRead,
+    rioMemCappedBufferWrite,
+    rioMemCappedBufferTell,
+    rioMemCappedBufferFlush,
+    NULL,       /* update_checksum */
+    0,          /* current checksum */
+    0,          /* flags */
+    0,          /* bytes read or written */
+    0,          /* read/write chunk size */
+    {{NULL, 0}} /* union for io-specific vars */
+};
+
+void rioInitWithMemCappedBuffer(rio *r, sds s, size_t buffer_limit_bytes) {
+    *r = rioMemCappedBufferIO;
+    r->io.memcap_buffer.ptr = s;
+    r->io.memcap_buffer.pos = 0;
+    r->io.memcap_buffer.buffer_limit_bytes = buffer_limit_bytes;
+    r->io.memcap_buffer.cap_reached = 0;
+}
+
 /* ------------------------- Buffer I/O implementation ----------------------- */
 
 /* Returns 1 or 0 for success/failure. */
