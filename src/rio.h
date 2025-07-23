@@ -47,6 +47,8 @@
 #define RIO_TYPE_CONN (1 << 2)
 #define RIO_TYPE_FD (1 << 3)
 
+typedef struct _rio rio;
+
 struct _rio {
     /* Backend functions.
      * Since this functions do not tolerate short writes or reads the return
@@ -73,13 +75,18 @@ struct _rio {
 
     /* Backend-specific vars. */
     union {
-        /* In-memory buffer target with a maximum capacity. */
+        /*
+        * In-memory buffer target with a maximum capacity,
+        * that flushes to an underlying RIO when capacity is reached.
+        */
         struct {
             sds ptr;
             off_t pos;
-            size_t buffer_limit_bytes;  /* Max capacity of buffer in Bytes */
+            size_t max_buffer_size;     /* Max capacity of buffer in Bytes */
             uint8_t cap_reached;        /* set to 1 if buffer capacity was reached on last write */
-        } memcap_buffer;
+            rio* underlying_rio;        /* The underlying RIO destination for the data. */
+            pthread_mutex_t* underlying_rio_mutex; /* Mutex for thread-safe access to file_rio. */
+        } buf_to_file;
         /* In-memory buffer target. */
         struct {
             sds ptr;
@@ -117,7 +124,6 @@ struct _rio {
     } io;
 };
 
-typedef struct _rio rio;
 
 /* The following functions are our interface with the stream. They'll call the
  * actual implementation of read / write / tell, and will update the checksum
@@ -192,7 +198,7 @@ static inline void rioClearErrors(rio *r) {
 
 void rioInitWithFile(rio *r, FILE *fp);
 void rioInitWithBuffer(rio *r, sds s);
-void rioInitWithMemCappedBuffer(rio *r, sds s, size_t buffer_limit_bytes);
+void rioInitWithBufferToFile(rio *r, sds s, size_t max_buffer_size, rio* underlying_rio, pthread_mutex_t *underlying_rio_mutex);
 void rioInitWithConn(rio *r, connection *conn, size_t read_limit);
 void rioInitWithFd(rio *r, int fd);
 

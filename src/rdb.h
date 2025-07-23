@@ -160,7 +160,7 @@ enum RdbType {
 #define RDB_LOAD_ERR_EMPTY_KEY 1 /* Error of empty key */
 #define RDB_LOAD_ERR_OTHER 2     /* Any other errors */
 
-ssize_t rdbWriteRaw(rio *rdb, void *p, size_t len);
+ssize_t rdbWriteRaw(rio *rdb, const void *p, size_t len);
 int rdbSaveType(rio *rdb, unsigned char type);
 int rdbLoadType(rio *rdb);
 time_t rdbLoadTime(rio *rdb);

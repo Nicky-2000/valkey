@@ -126,8 +126,8 @@ void initRDBThreads(int per_thread_queue_size) {
 
 static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio *rdb, long *key_counter, char *pname, long long * info_updated_time) {
     RdbSaveThreadArgs *threadArgs = zcalloc(num_threads * sizeof(RdbSaveThreadArgs));
-    pthread_mutex_t *shared_write_mutex = zmalloc(sizeof(pthread_mutex_t)); // Shared amongst all threads
-    pthread_mutex_init(shared_write_mutex, NULL);
+    pthread_mutex_t *shared_rdb_write_mutex = zmalloc(sizeof(pthread_mutex_t)); // Shared amongst all threads
+    pthread_mutex_init(shared_rdb_write_mutex, NULL);
 
     for (int i = 0; i < num_threads; i++) {
         RdbSaveThreadArgs *ta = &threadArgs[i];
@@ -135,9 +135,9 @@ static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio
         ta->ht = NULL;  // Set by the main thread in rdbSaveDbMultiThreaded for each hashtable in the database
         ta->bucket_stride = (BucketStride){.start_index=i, .stride_size=num_threads};
         atomic_init(&ta->keys_processed, 0);
-        rioInitWithMemCappedBuffer(&ta->memcap_buffer_rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_DEFAULT_SIZE), WORKER_BUFFER_CAPACITY_LIMIT);
+        rioInitWithBufferToFile(&ta->buf_to_file_rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_DEFAULT_SIZE), WORKER_BUFFER_CAPACITY_LIMIT, rdb, shared_rdb_write_mutex);
         ta->rdb = rdb;
-        ta->write_mutex = shared_write_mutex;
+        ta->rdb_write_mutex = shared_rdb_write_mutex;
         ta->save_status = C_OK;
         
         /* The main thread needs this information to report the save progress */
@@ -147,7 +147,6 @@ static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio
             ta->main_thread_report_info->last_key_counter = key_counter;
             ta->main_thread_report_info->pname = pname;
             ta->main_thread_report_info->threadArgs = threadArgs;
-
         } else{
             ta->main_thread_report_info = NULL;
         }
@@ -159,13 +158,12 @@ static void freeRdbSaveThreadArgs(int num_threads, RdbSaveThreadArgs *threadArgs
     serverAssert(threadArgs != NULL);
 
     for (int i = 0; i < num_threads; i++) {
-        sdsfree(threadArgs[i].memcap_buffer_rio.io.memcap_buffer.ptr);
+        sdsfree(threadArgs[i].buf_to_file_rio.io.buf_to_file.ptr);
     }
     /* Free the shared write mutex one time*/
-    pthread_mutex_t *shared_write_mutex = threadArgs[0].write_mutex;
-    pthread_mutex_destroy(shared_write_mutex);
-    zfree(shared_write_mutex);
-    
+    pthread_mutex_destroy(threadArgs[0].rdb_write_mutex);
+    zfree(threadArgs[0].rdb_write_mutex);
+
     /* Free the MainThreadRdbInfo */
     zfree(threadArgs[0].main_thread_report_info);
 
@@ -175,11 +173,11 @@ static void freeRdbSaveThreadArgs(int num_threads, RdbSaveThreadArgs *threadArgs
 
 /* --------- Multithreaded RDB Save: Worker Job Handler & Helpers --------- */
 
-/* Clears and resets a memory-capped RIO buffer. */
-void clearRioMemCapBuffer(rio* memcap_buffer_rio) {
-    sdsclear(memcap_buffer_rio->io.memcap_buffer.ptr);
-    memcap_buffer_rio->io.memcap_buffer.cap_reached = 0;
-    memcap_buffer_rio->io.memcap_buffer.pos = 0;
+/* Clears and resets the buffer in a rioBufferToFileIO instance. */
+void clearRioBufferToFile(rio* memcap_buffer_rio) {
+    sdsclear(memcap_buffer_rio->io.buf_to_file.ptr);
+    memcap_buffer_rio->io.buf_to_file.cap_reached = 0;
+    memcap_buffer_rio->io.buf_to_file.pos = 0;
     memcap_buffer_rio->processed_bytes = 0;
 }
 
@@ -209,7 +207,7 @@ void rdbEncodeHashtableRange(void *arg) {
     serverDb *db = server.db[args->dbid];
     hashtable *ht = args->ht;
     BucketStride *bucket_stride = &args->bucket_stride;
-    rio *memcap_buffer_rio = &args->memcap_buffer_rio;
+    rio *buf_to_file_rio = &args->buf_to_file_rio;
     
     hashtableIterator ht_iter;
     hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_PREFETCH_VALUES);
@@ -222,38 +220,42 @@ void rdbEncodeHashtableRange(void *arg) {
         sds keystr = objectGetKey(o);
         robj key;
         long long expire;
-        size_t processed_bytes_before = memcap_buffer_rio->processed_bytes;
+        size_t processed_bytes_before = buf_to_file_rio->processed_bytes;
 
         initStaticStringObject(key, keystr);
         expire = getExpire(db, &key);
 
         /* Attempt to write key-value pair to the thread's local buffer. */
-        res = rdbSaveKeyValuePair(memcap_buffer_rio, &key, o, expire, args->dbid);
-        size_t processed_bytes_after = memcap_buffer_rio->processed_bytes;
+        res = rdbSaveKeyValuePair(buf_to_file_rio, &key, o, expire, args->dbid);
+        size_t processed_bytes_after = buf_to_file_rio->processed_bytes;
 
-        if (res < 0 && memcap_buffer_rio->io.memcap_buffer.cap_reached) { /* Failed write due to hitting the buffers memory cap */
-            /* If key is too large for the buffer, we will write the valid data in the buffer to the rdb file
-               and the stream the large key directly to the rdb. */
-            pthread_mutex_lock(args->write_mutex);
-
-            if (processed_bytes_before > 0) {
-                /* If there are already encoded keys in the buffer we can also write them out */
-                if ((res = rdbWriteRaw(args->rdb, memcap_buffer_rio->io.memcap_buffer.ptr, processed_bytes_before)) < 0) goto werr;
-                args->bytes_written += res;
-                clearRioMemCapBuffer(memcap_buffer_rio);
+        if (res < 0 ) {
+            if (buf_to_file_rio->io.buf_to_file.cap_reached) {
+                 pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
             }
-
-            /* Stream large key directly to RDB, bypassing the buffer. */
-            processed_bytes_before = args->rdb->processed_bytes;
-            if ((res = rdbSaveKeyValuePair(args->rdb, &key, o, expire, args->dbid)) < 0) goto werr;
-            processed_bytes_after = args->rdb->processed_bytes;
-            args->bytes_written += res;
-
-            pthread_mutex_unlock(args->write_mutex);
-        } else if (res < 0) {
-            goto werr; /* Write failed for some reason other than exceeding the buffer limit */
+            goto werr;
         }
+        /* Our write was successful. Need to check if we hit the memory cap while writing this key*/ 
+        if (buf_to_file_rio->io.buf_to_file.cap_reached) {
+            /* If we hit the memory cap during the call to rdbSaveKeyValuePair we need too: 
+                1. Unlock the shared mutex that was aquired in rioBufferToFileWrite
+                2. Clear the buffer since it was written to the file already in rioBufferToFileWrite
+            */
+            serverLog(LL_NOTICE, "Thread %d releasing lock in rdbEncodeHashtableRange", getThreadID());
+            pthread_mutex_unlock(args->rdb_write_mutex);
+            clearRioBufferToFile(buf_to_file_rio);
 
+        } else if (buf_to_file_rio->processed_bytes > (size_t) WORKER_BUFFER_DEFAULT_SIZE) {
+            /* We did not hit the memory cap, but we have enough data to write out*/
+            pthread_mutex_lock(args->rdb_write_mutex);
+            res = rdbWriteRaw(args->rdb, buf_to_file_rio->io.buf_to_file.ptr, buf_to_file_rio->processed_bytes);
+            pthread_mutex_unlock(args->rdb_write_mutex);
+            
+            if (res < 0) goto werr;
+            clearRioBufferToFile(buf_to_file_rio);
+        }
+        
+        args->bytes_written += res;
         atomic_fetch_add(&args->keys_processed, 1);
 
         /* In fork child process, we can try to release memory back to the
@@ -262,16 +264,6 @@ void rdbEncodeHashtableRange(void *arg) {
         size_t dump_size = processed_bytes_after - processed_bytes_before;
         if (server.in_fork_child) dismissObject(o, dump_size);
 
-        /* If we have filled up the buffer aquire lock and write contents to RDB file */
-        if (memcap_buffer_rio->processed_bytes > (size_t) WORKER_BUFFER_DEFAULT_SIZE) {
-            pthread_mutex_lock(args->write_mutex);
-            if ((res = rdbWriteRaw(args->rdb, memcap_buffer_rio->io.memcap_buffer.ptr, memcap_buffer_rio->processed_bytes)) < 0) goto werr;
-            pthread_mutex_unlock(args->write_mutex);
-
-            args->bytes_written += res;
-            clearRioMemCapBuffer(memcap_buffer_rio);
-        }
-
         /* Main thread only: update parent process with progress. */
         if (inMainThread()) {
             updateParentProcessWithSaveInfo(args->main_thread_report_info);
@@ -279,13 +271,14 @@ void rdbEncodeHashtableRange(void *arg) {
     }
 
     /* Write any remaining buffered data to the RDB file. */
-    if (memcap_buffer_rio->processed_bytes > 0) {
-        pthread_mutex_lock(args->write_mutex);
-        if ((res = rdbWriteRaw(args->rdb, memcap_buffer_rio->io.memcap_buffer.ptr, memcap_buffer_rio->processed_bytes)) < 0) goto werr;
-        pthread_mutex_unlock(args->write_mutex);
-
+    if (buf_to_file_rio->processed_bytes > 0) {
+        pthread_mutex_lock(args->rdb_write_mutex);
+        res = rdbWriteRaw(args->rdb, buf_to_file_rio->io.buf_to_file.ptr, buf_to_file_rio->processed_bytes);
+        pthread_mutex_unlock(args->rdb_write_mutex);
+        if (res < 0) goto werr;
+        
         args->bytes_written += res;
-        clearRioMemCapBuffer(memcap_buffer_rio);
+        clearRioBufferToFile(buf_to_file_rio);
     }
 
     hashtableResetIterator(&ht_iter);
@@ -344,7 +337,7 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
         for (int i = 0; i < server.rdb_threads_num; i++) { 
             RdbSaveThreadArgs *ta = &threadArgs[i];
             ta->ht = ht;
-            clearRioMemCapBuffer(&ta->memcap_buffer_rio);
+            clearRioBufferToFile(&ta->buf_to_file_rio);
 
             if (i == 0) continue; /* Main thread processes its job directly. Don't need to queue. */ 
             
