@@ -165,7 +165,7 @@ void hashtableResetIterator(hashtableIterator *iter);
 hashtableIterator *hashtableCreateIterator(hashtable *ht, uint8_t flags);
 void hashtableReleaseIterator(hashtableIterator *iter);
 int hashtableNext(hashtableIterator *iter, void **elemptr);
-int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t start_index, size_t stride);
+int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t logical_start_index, size_t stride);
 
 /* Random entries */
 int hashtableRandomEntry(hashtable *ht, void **found);
