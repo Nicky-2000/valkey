@@ -144,7 +144,7 @@ int rdbRegisterAuxField(char *auxfield, rdbAuxFieldEncoder encoder, rdbAuxFieldD
     return dictAdd(rdbAuxFields, sdsnew(auxfield), (void *)codec) == DICT_OK ? C_OK : C_ERR;
 }
 
-ssize_t rdbWriteRaw(rio *rdb, void *p, size_t len) {
+ssize_t rdbWriteRaw(rio *rdb, const void *p, size_t len) {
     if (rdb && rioWrite(rdb, p, len) == 0) return -1;
     return len;
 }
