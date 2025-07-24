@@ -71,7 +71,7 @@ static size_t rioBufferToFileWrite(rio *r, const void *buf, size_t len) {
     /* Transition to direct write if buffer cap reached or current write overflows. */
     if (!r->io.buf_to_file.cap_reached) { 
         /* First time hitting the memory cap. 
-         * We enter this block a maximum of 1 time per rdbSaveKeyValuePair call in rdbEncodedHashtableRange */
+         * We enter this block a maximum of 1 time per rdbSaveKeyValuePair() call in rdbEncodedHashtableRange */
         r->io.buf_to_file.cap_reached = 1;
 
         
