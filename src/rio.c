@@ -70,10 +70,16 @@ static size_t rioBufferToFileWrite(rio *r, const void *buf, size_t len) {
 
     /* Transition to direct write if buffer cap reached or current write overflows. */
     if (!r->io.buf_to_file.cap_reached) { 
-        /* First time hitting the memory cap*/
+        /* First time hitting the memory cap. 
+         * We enter this block a maximum of 1 time per rdbSaveKeyValuePair call in rdbEncodedHashtableRange */
         r->io.buf_to_file.cap_reached = 1;
+
         
-        pthread_mutex_lock(r->io.buf_to_file.underlying_rio_mutex); /* Aquire underlying rio mutex*/
+        /* Aquire underlying rio mutex. The caller (rdbEncodedHashtableRange) is responsible 
+         * for unlocking the mutex once the current key has been fully streamed out.  
+         * The caller knows to release the mutex if cap_reached = 1.
+         */
+        pthread_mutex_lock(r->io.buf_to_file.underlying_rio_mutex); 
 
         /* Dump existing buffered data to underlying RIO. */
         if (r->io.buf_to_file.pos > 0) {

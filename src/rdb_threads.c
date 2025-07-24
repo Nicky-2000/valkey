@@ -230,16 +230,15 @@ void rdbEncodeHashtableRange(void *arg) {
         size_t processed_bytes_after = buf_to_file_rio->processed_bytes;
 
         if (res < 0 ) {
-            if (buf_to_file_rio->io.buf_to_file.cap_reached) {
-                 pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
-            }
+            /* Release lock if we aquired it */
+            if (buf_to_file_rio->io.buf_to_file.cap_reached) pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
             goto werr;
         }
-        /* Our write was successful. Need to check if we hit the memory cap while writing this key*/ 
+        /* Our write was successful. Check if we hit the memory cap while writing this key */ 
         if (buf_to_file_rio->io.buf_to_file.cap_reached) {
             /* If we hit the memory cap during the call to rdbSaveKeyValuePair we need too: 
-                1. Unlock the shared mutex that was aquired in rioBufferToFileWrite
-                2. Clear the buffer since it was written to the file already in rioBufferToFileWrite
+                1. Unlock the mutex that was aquired in rioBufferToFileWrite
+                2. Clear the buffer since it was already written to the file in rioBufferToFileWrite
             */
             serverLog(LL_NOTICE, "Thread %d releasing lock in rdbEncodeHashtableRange", getThreadID());
             pthread_mutex_unlock(args->rdb_write_mutex);
