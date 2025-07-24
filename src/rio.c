@@ -73,12 +73,12 @@ static size_t rioBufferToFileWrite(rio *r, const void *buf, size_t len) {
         /* First time hitting the memory cap*/
         r->io.buf_to_file.cap_reached = 1;
         
-        pthread_mutex_lock(r->io.buf_to_file.underlying_rio_mutex); /* Aquire underlying rio mutex*/
+        // pthread_mutex_lock(r->io.buf_to_file.underlying_rio_mutex); /* Aquire underlying rio mutex*/
 
         /* Dump existing buffered data to underlying RIO. */
         if (r->io.buf_to_file.pos > 0) {
             if (rdbWriteRaw(r->io.buf_to_file.underlying_rio, r->io.buf_to_file.ptr, r->io.buf_to_file.pos) < 0) {
-                pthread_mutex_unlock(r->io.buf_to_file.underlying_rio_mutex); /* Release lock on error. */
+                // pthread_mutex_unlock(r->io.buf_to_file.underlying_rio_mutex); /* Release lock on error. */
                 return 0;
             }
         }

@@ -124,7 +124,7 @@ void initRDBThreads(int per_thread_queue_size) {
 
 /* --------- Multithreaded RDB Save: Thread Argument Management --------- */
 
-static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio *rdb, long *key_counter, char *pname, long long * info_updated_time) {
+static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio *thread_rdbs, long *key_counter, char *pname, long long * info_updated_time) {
     RdbSaveThreadArgs *threadArgs = zcalloc(num_threads * sizeof(RdbSaveThreadArgs));
     pthread_mutex_t *shared_rdb_write_mutex = zmalloc(sizeof(pthread_mutex_t)); // Shared amongst all threads
     pthread_mutex_init(shared_rdb_write_mutex, NULL);
@@ -135,8 +135,8 @@ static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio
         ta->ht = NULL;  // Set by the main thread in rdbSaveDbMultiThreaded for each hashtable in the database
         ta->bucket_stride = (BucketStride){.start_index=i, .stride_size=num_threads};
         atomic_init(&ta->keys_processed, 0);
-        rioInitWithBufferToFile(&ta->buf_to_file_rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_DEFAULT_SIZE), WORKER_BUFFER_CAPACITY_LIMIT, rdb, shared_rdb_write_mutex);
-        ta->rdb = rdb;
+        rioInitWithBufferToFile(&ta->buf_to_file_rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_DEFAULT_SIZE), WORKER_BUFFER_CAPACITY_LIMIT, &thread_rdbs[i], shared_rdb_write_mutex);
+        ta->rdb = &thread_rdbs[i];
         ta->rdb_write_mutex = shared_rdb_write_mutex;
         ta->save_status = C_OK;
         
@@ -231,7 +231,7 @@ void rdbEncodeHashtableRange(void *arg) {
 
         if (res < 0 ) {
             if (buf_to_file_rio->io.buf_to_file.cap_reached) {
-                 pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
+                //  pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
             }
             goto werr;
         }
@@ -242,14 +242,14 @@ void rdbEncodeHashtableRange(void *arg) {
                 2. Clear the buffer since it was written to the file already in rioBufferToFileWrite
             */
             serverLog(LL_NOTICE, "Thread %d releasing lock in rdbEncodeHashtableRange", getThreadID());
-            pthread_mutex_unlock(args->rdb_write_mutex);
+            // pthread_mutex_unlock(args->rdb_write_mutex);
             clearRioBufferToFile(buf_to_file_rio);
 
         } else if (buf_to_file_rio->processed_bytes > (size_t) WORKER_BUFFER_DEFAULT_SIZE) {
             /* We did not hit the memory cap, but we have enough data to write out*/
-            pthread_mutex_lock(args->rdb_write_mutex);
+            // pthread_mutex_lock(args->rdb_write_mutex);
             res = rdbWriteRaw(args->rdb, buf_to_file_rio->io.buf_to_file.ptr, buf_to_file_rio->processed_bytes);
-            pthread_mutex_unlock(args->rdb_write_mutex);
+            // pthread_mutex_unlock(args->rdb_write_mutex);
             
             if (res < 0) goto werr;
             clearRioBufferToFile(buf_to_file_rio);
@@ -306,7 +306,7 @@ void drainRDBThreadsQueue(void) {
 }
 
 /* Performs a multithreaded RDB save for a specific database. */
-ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pname) {
+ssize_t rdbSaveDbMultiThreaded(rio *thread_rdbs, int dbid, long *key_counter, char *pname) {
     serverAssert(server.rdb_threads_num > 1);
     ssize_t written = 0;
 
@@ -314,7 +314,7 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
     long long info_updated_time = 0;
 
     /* 1. Create and initialize thread arguments for all RDB threads. */
-    RdbSaveThreadArgs *threadArgs = createRdbSaveThreadArgs(server.rdb_threads_num, dbid, rdb, key_counter, pname, &info_updated_time);
+    RdbSaveThreadArgs *threadArgs = createRdbSaveThreadArgs(server.rdb_threads_num, dbid, thread_rdbs, key_counter, pname, &info_updated_time);
 
     kvstoreIterator *kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
     hashtable *ht;
@@ -324,13 +324,16 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
     while ((ht = kvstoreIteratorNextHashtable(kvs_it)) != NULL) {
         /* 2.1. Write metadata (e.g., "slot-info") to RDB file if in cluster mode. */
         int curr_slot = kvstoreIteratorGetCurrentHashtableIndex(kvs_it);
-        if (server.cluster_enabled && curr_slot != last_slot) {
-            sds slot_info = sdscatprintf(sdsempty(), "%i,%lu,%lu", curr_slot,
-                                         kvstoreHashtableSize(db->keys, curr_slot),
-                                         kvstoreHashtableSize(db->expires, curr_slot));
-            rdbSaveAuxFieldStrStr(rdb, "slot-info", slot_info);
-            sdsfree(slot_info);
-            last_slot = curr_slot;
+        for (int i = 0; i < server.rdb_threads_num; i++) {
+            if (server.cluster_enabled && curr_slot != last_slot) {
+                rio *rdb = &thread_rdbs[i];
+                sds slot_info = sdscatprintf(sdsempty(), "%i,%lu,%lu", curr_slot,
+                                            kvstoreHashtableSize(db->keys, curr_slot),
+                                            kvstoreHashtableSize(db->expires, curr_slot));
+                rdbSaveAuxFieldStrStr(rdb, "slot-info", slot_info);
+                sdsfree(slot_info);
+                last_slot = curr_slot;
+            }
         }
 
         /* 2.2. Assign a range of the current hashtable to each RDB thread. */

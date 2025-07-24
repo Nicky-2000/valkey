@@ -1334,39 +1334,43 @@ werr:
     return -1;
 }
 
-ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
+ssize_t rdbSaveDb(rio *thread_rdbs, int dbid, int rdbflags, long *key_counter) {
     ssize_t written = 0;
     ssize_t res;
     kvstoreIterator *kvs_it = NULL;
     static long long info_updated_time = 0;
     char *pname = (rdbflags & RDBFLAGS_AOF_PREAMBLE) ? "AOF rewrite" : "RDB";
-
+    
     serverDb *db = server.db[dbid];
     if (db == NULL) return 0;
     unsigned long long int db_size = kvstoreSize(db->keys);
     if (db_size == 0) return 0;
 
-    /* Write the SELECT DB opcode */
-    if ((res = rdbSaveType(rdb, RDB_OPCODE_SELECTDB)) < 0) goto werr;
-    written += res;
-    if ((res = rdbSaveLen(rdb, dbid)) < 0) goto werr;
-    written += res;
+    for (int i = 0; i < server.rdb_threads_num; i ++) {
+        rio *rdb = &thread_rdbs[i];
+        /* Write the SELECT DB opcode */
+        if ((res = rdbSaveType(rdb, RDB_OPCODE_SELECTDB)) < 0) goto werr;
+        written += res;
+        if ((res = rdbSaveLen(rdb, dbid)) < 0) goto werr;
+        written += res;
 
-    /* Write the RESIZE DB opcode. */
-    unsigned long long expires_size = kvstoreSize(db->expires);
-    if ((res = rdbSaveType(rdb, RDB_OPCODE_RESIZEDB)) < 0) goto werr;
-    written += res;
-    if ((res = rdbSaveLen(rdb, db_size)) < 0) goto werr;
-    written += res;
-    if ((res = rdbSaveLen(rdb, expires_size)) < 0) goto werr;
-    written += res;
+        /* Write the RESIZE DB opcode. */
+        unsigned long long expires_size = kvstoreSize(db->expires);
+        if ((res = rdbSaveType(rdb, RDB_OPCODE_RESIZEDB)) < 0) goto werr;
+        written += res;
+        if ((res = rdbSaveLen(rdb, db_size)) < 0) goto werr;
+        written += res;
+        if ((res = rdbSaveLen(rdb, expires_size)) < 0) goto werr;
+        written += res;
+    }
 
     /* Save the DB using RDB Threads if enabled */
     if (server.rdb_threads_num > 1) {
-        if ((res = rdbSaveDbMultiThreaded(rdb, dbid, key_counter, pname)) < 0) goto werr;
+        if ((res = rdbSaveDbMultiThreaded(thread_rdbs, dbid, key_counter, pname)) < 0) goto werr;
         written += res;
         return written;
     }
+    rio *rdb = &thread_rdbs[0];
 
     /* Fall back to single threaded save */
     kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
@@ -1431,49 +1435,45 @@ werr:
  * When the function returns C_ERR and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the value of errno just after the I/O
  * error. */
-int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
+int rdbSaveRio(int req, rio *thread_rdbs, int *error, int rdbflags, rdbSaveInfo *rsi) {
     char magic[10];
     uint64_t cksum;
     long key_counter = 0;
     int j;
 
-    if (server.rdb_checksum) rdb->update_cksum = rioGenericUpdateChecksum;
-    /* TODO: Change this to "VALKEY%03d" next time we bump the RDB version. */
-    snprintf(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
-    if (rdbWriteRaw(rdb, magic, 9) == -1) goto werr;
-    if (rdbSaveInfoAuxFields(rdb, rdbflags, rsi) == -1) goto werr;
-    if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_BEFORE_RDB) == -1) goto werr;
-
-    /* save functions */
-    if (!(req & REPLICA_REQ_RDB_EXCLUDE_FUNCTIONS) && rdbSaveFunctions(rdb) == -1) goto werr;
-    
-    /* Start the RDB Threads that will be used for Saving */
-    if (server.rdb_threads_num > 1) {
-        initRDBThreads(RDB_SAVE_JOB_QUEUE_SIZE);
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        rio *rdb = &thread_rdbs[i];
+        if (server.rdb_checksum) rdb->update_cksum = rioGenericUpdateChecksum;
+        /* TODO: Change this to "VALKEY%03d" next time we bump the RDB version. */
+        snprintf(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
+        if (rdbWriteRaw(rdb, magic, 9) == -1) goto werr;
+        if (rdbSaveInfoAuxFields(rdb, rdbflags, rsi) == -1) goto werr;
+        if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_BEFORE_RDB) == -1) goto werr;
+        /* save functions */
+        if (!(req & REPLICA_REQ_RDB_EXCLUDE_FUNCTIONS) && rdbSaveFunctions(rdb) == -1) goto werr;
     }
 
     /* save all databases, skip this if we're in functions-only mode */
     if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA)) {
         for (j = 0; j < server.dbnum; j++) {
-            if (rdbSaveDb(rdb, j, rdbflags, &key_counter) == -1) goto werr;
+            if (rdbSaveDb(thread_rdbs, j, rdbflags, &key_counter) == -1) goto werr;
         }
     }
-    
-    /* Kill the RDB threads if they were initialized */
-    if (server.rdb_threads_num > 1) {
-        killRDBThreads();
+
+
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        rio *rdb = &thread_rdbs[i];
+        if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_AFTER_RDB) == -1) goto werr;
+        if (rdbSaveType(rdb, RDB_OPCODE_EOF) == -1) goto werr;
+
+        /* CRC64 checksum. It will be zero if checksum computation is disabled, the
+        * loading code skips the check in this case. */
+        cksum = rdb->cksum;
+        memrev64ifbe(&cksum);
+        if (rioWrite(rdb, &cksum, 8) == 0) goto werr;
     }
-
-    if (!(req & REPLICA_REQ_RDB_EXCLUDE_DATA) && rdbSaveModulesAux(rdb, VALKEYMODULE_AUX_AFTER_RDB) == -1) goto werr;
-
     /* EOF opcode */
-    if (rdbSaveType(rdb, RDB_OPCODE_EOF) == -1) goto werr;
 
-    /* CRC64 checksum. It will be zero if checksum computation is disabled, the
-     * loading code skips the check in this case. */
-    cksum = rdb->cksum;
-    memrev64ifbe(&cksum);
-    if (rioWrite(rdb, &cksum, 8) == 0) goto werr;
     return C_OK;
 
 werr:
@@ -1511,55 +1511,77 @@ werr: /* Write error. */
     return C_ERR;
 }
 
-static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int rdbflags) {
+static int rdbSaveInternal(int req, char **tmp_filenames, rdbSaveInfo *rsi, int rdbflags) {
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
-    rio rdb;
     int error = 0;
     int saved_errno;
     char *err_op; /* For a detailed log */
+    FILE *thread_fps[server.rdb_threads_num];
+    rio thread_rios[server.rdb_threads_num];
 
-    FILE *fp = fopen(filename, "w");
-    if (!fp) {
-        saved_errno = errno;
-        char *str_err = strerror(errno);
-        char *cwdp = getcwd(cwd, MAXPATHLEN);
-        serverLog(LL_WARNING,
-                  "Failed opening the temp RDB file %s (in server root dir %s) "
-                  "for saving: %s",
-                  filename, cwdp ? cwdp : "unknown", str_err);
-        errno = saved_errno;
-        return C_ERR;
+    // Initialize array elements to NULL for robust cleanup
+    for(int i = 0; i < server.rdb_threads_num; i++) {
+        thread_fps[i] = NULL;
     }
 
-    rioInitWithFile(&rdb, fp);
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        FILE *fp = fopen(tmp_filenames[i], "w");
+        if (!fp) {
+            saved_errno = errno;
+            char *str_err = strerror(errno);
+            char *cwdp = getcwd(cwd, MAXPATHLEN);
+            serverLog(LL_WARNING,
+                    "Failed opening the temp RDB file %s (in server root dir %s) "
+                    "for saving: %s",
+                    tmp_filenames[i], cwdp ? cwdp : "unknown", str_err);
+            errno = saved_errno;
+            return C_ERR;
+        }
+        thread_fps[i] = fp;
+        // Initialize a file-based RIO for each thread's temp file
+        rioInitWithFile(&thread_rios[i], fp);
 
-    if (server.rdb_save_incremental_fsync) {
-        rioSetAutoSync(&rdb, REDIS_AUTOSYNC_BYTES);
-        if (!(rdbflags & RDBFLAGS_KEEP_CACHE)) rioSetReclaimCache(&rdb, 1);
+        if (server.rdb_save_incremental_fsync) {
+            rioSetAutoSync(&thread_rios[i], REDIS_AUTOSYNC_BYTES);
+            if (!(rdbflags & RDBFLAGS_KEEP_CACHE)) rioSetReclaimCache(&thread_rios[i], 1);
+        }
     }
 
-    if (rdbSaveRio(req, &rdb, &error, rdbflags, rsi) == C_ERR) {
+    /* Start the RDB Threads that will be used for Saving */
+    if (server.rdb_threads_num > 1) {
+        initRDBThreads(RDB_SAVE_JOB_QUEUE_SIZE);
+    }
+
+    if (rdbSaveRio(req, &thread_rios[0], &error, rdbflags, rsi) == C_ERR) {
         errno = error;
         err_op = "rdbSaveRio";
         goto werr;
     }
 
+    /* Kill the RDB threads if they were initialized */
+    if (server.rdb_threads_num > 1) {
+        killRDBThreads();
+    }
+
     /* Make sure data will not remain on the OS's output buffers */
-    if (fflush(fp)) {
-        err_op = "fflush";
-        goto werr;
-    }
-    if (fsync(fileno(fp))) {
-        err_op = "fsync";
-        goto werr;
-    }
-    if (!(rdbflags & RDBFLAGS_KEEP_CACHE) && reclaimFilePageCache(fileno(fp), 0, 0) == -1) {
-        serverLog(LL_NOTICE, "Unable to reclaim cache after saving RDB: %s", strerror(errno));
-    }
-    if (fclose(fp)) {
-        fp = NULL;
-        err_op = "fclose";
-        goto werr;
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+
+        if (fflush(thread_fps[i])) {
+            err_op = "fflush";
+            goto werr;
+        }
+        if (fsync(fileno(thread_fps[i]))) {
+            err_op = "fsync";
+            goto werr;
+        }
+        if (!(rdbflags & RDBFLAGS_KEEP_CACHE) && reclaimFilePageCache(fileno(thread_fps[i]), 0, 0) == -1) {
+            serverLog(LL_NOTICE, "Unable to reclaim cache after saving RDB: %s", strerror(errno));
+        }
+        if (fclose(thread_fps[i])) {
+            thread_fps[i] = NULL;
+            err_op = "fclose";
+            goto werr;
+        }
     }
 
     return C_OK;
@@ -1567,18 +1589,20 @@ static int rdbSaveInternal(int req, const char *filename, rdbSaveInfo *rsi, int 
 werr:
     saved_errno = errno;
     serverLog(LL_WARNING, "Write error while saving DB to the disk(%s): %s", err_op, strerror(errno));
-    if (fp) fclose(fp);
-    unlink(filename);
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        if (thread_fps[i]) fclose(thread_fps[i]);
+        unlink(tmp_filenames[i]);
+    }
     errno = saved_errno;
     return C_ERR;
 }
 
 /* Save DB to the file. Similar to rdbSave() but this function won't use a
  * temporary file and won't update the metrics. */
-int rdbSaveToFile(const char *filename) {
+int rdbSaveToFile(char *filename) {
     startSaving(RDBFLAGS_NONE);
 
-    if (rdbSaveInternal(REPLICA_REQ_NONE, filename, NULL, RDBFLAGS_NONE) != C_OK) {
+    if (rdbSaveInternal(REPLICA_REQ_NONE, &filename, NULL, RDBFLAGS_NONE) != C_OK) {
         int saved_errno = errno;
         stopSaving(0);
         errno = saved_errno;
@@ -1591,41 +1615,60 @@ int rdbSaveToFile(const char *filename) {
 
 /* Save the DB on disk. Return C_ERR on error, C_OK on success. */
 int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
-    char tmpfile[256];
+    // char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
 
-    startSaving(rdbflags);
-    snprintf(tmpfile, 256, "temp-%d.rdb", (int)getpid());
+    char *tmp_filenames[server.rdb_threads_num];
+    char final_filenames[server.rdb_threads_num][256];
 
-    if (rdbSaveInternal(req, tmpfile, rsi, rdbflags) != C_OK) {
+
+    startSaving(rdbflags);
+    // Generate all temporary filenames and prepare final filenames
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        tmp_filenames[i] = zmalloc(256); // Allocate memory for each string
+        // Unique temporary name: temp-<pid>_N.rdb
+        snprintf(tmp_filenames[i], 256, "temp-%d.rdb_%d", (int)getpid(), i);
+        // Final name: filename_N.rdb
+        snprintf(final_filenames[i], 256, "dump_%d.rdb", i);
+    }
+
+    if (rdbSaveInternal(req, tmp_filenames, rsi, rdbflags) != C_OK) {
         stopSaving(0);
         return C_ERR;
     }
 
     /* Use RENAME to make sure the DB file is changed atomically only
      * if the generate DB file is ok. */
-    if (rename(tmpfile, filename) == -1) {
-        char *str_err = strerror(errno);
-        char *cwdp = getcwd(cwd, MAXPATHLEN);
-        serverLog(LL_WARNING,
-                  "Error moving temp DB file %s on the final "
-                  "destination %s (in server root dir %s): %s",
-                  tmpfile, filename, cwdp ? cwdp : "unknown", str_err);
-        unlink(tmpfile);
-        stopSaving(0);
-        return C_ERR;
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        if (rename(tmp_filenames[i], final_filenames[i]) == -1) {
+            char *str_err = strerror(errno);
+            char *cwdp = getcwd(cwd, MAXPATHLEN);
+            serverLog(LL_WARNING,
+                    "Error moving temp DB file %s on the final "
+                    "destination %s (in server root dir %s): %s",
+                    tmp_filenames[i], final_filenames[i], cwdp ? cwdp : "unknown", str_err);
+            unlink(tmp_filenames[i]);
+            stopSaving(0);
+            return C_ERR;
+        }
+        if (fsyncFileDir(final_filenames[i]) != 0) {
+            serverLog(LL_WARNING, "Failed to fsync directory while saving DB: %s", strerror(errno));
+            stopSaving(0);
+            return C_ERR;
+        }
     }
-    if (fsyncFileDir(filename) != 0) {
-        serverLog(LL_WARNING, "Failed to fsync directory while saving DB: %s", strerror(errno));
-        stopSaving(0);
-        return C_ERR;
-    }
+
 
     serverLog(LL_NOTICE, "DB saved on disk");
     server.dirty = 0;
     server.lastsave = time(NULL);
     server.lastbgsave_status = C_OK;
     stopSaving(1);
+
+    // Free all dynamically allocated temporary filename strings
+    for (int i = 0; i < server.rdb_threads_num; i++) {
+        zfree(tmp_filenames[i]);
+    }
     return C_OK;
 }
 
