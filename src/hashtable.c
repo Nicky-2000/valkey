@@ -1025,21 +1025,22 @@ static bucket *getNextBucket(bucket *current_bucket, size_t next_top_level_index
 
 /* This function prefetches data that will be needed in subsequent iterations:
  * - The entries of the next bucket
- * - The next of the next bucket
+ * - The structure of the next of the next bucket
  * It attempts to bring this data closer to the L1 cache to reduce future memory access latency.
  *
  * Cache state before this function is called (due to last call for this function):
  * 1. The current bucket and its entries are likely already in cache.
  * 2. The next bucket is in cache.
  */
-static void prefetchNextBucketEntries(iter *iter, bucket *current_bucket) {
-    size_t next_index = iter->index + 1;
-    bucket *next_bucket = getNextBucket(current_bucket, next_index, iter->hashtable, iter->table);
+static void prefetchNextBucketEntries(iter *iter, bucket *current_bucket, size_t stride) {
+    size_t next_top_level_index = iter->index + stride;
+
+    bucket *next_bucket = getNextBucket(current_bucket, next_top_level_index, iter->hashtable, iter->table);
     if (next_bucket) {
         prefetchBucketEntries(next_bucket);
         /* Calculate the target top-level index for the next-next bucket. */
-        if (!current_bucket->chained) next_index++;
-        bucket *next_next_bucket = getNextBucket(next_bucket, next_index, iter->hashtable, iter->table);
+        if (!current_bucket->chained) next_top_level_index += stride;
+        bucket *next_next_bucket = getNextBucket(next_bucket, next_top_level_index, iter->hashtable, iter->table);
         if (next_next_bucket) {
             valkey_prefetch(next_next_bucket);
         }
@@ -2068,7 +2069,7 @@ int hashtableNext(hashtableIterator *iterator, void **elemptr) {
             if (shouldPrefetchValues(iter)) {
                 prefetchBucketValues(b, iter->hashtable);
             }
-            prefetchNextBucketEntries(iter, b);
+            prefetchNextBucketEntries(iter, b, 1); /* stride=1 for hashtableNext */
         }
         if (!isPositionFilled(b, iter->pos_in_bucket)) {
             /* No entry here. */
@@ -2248,10 +2249,7 @@ int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t logi
             if (shouldPrefetchValues(iter)) {
                 prefetchBucketValues(b, iter->hashtable);
             }
-            // TODO: Right now prefetchNextBucketEntries will be fine if we have a child bucket. 
-            // But it will not prefetch the correct bucket if we need to stride on the next iteration.
-            // Need to make this function stride aware. Or make a new version of the function entirely.
-            prefetchNextBucketEntries(iter, b);
+            prefetchNextBucketEntries(iter, b, stride);
         }
         if (!isPositionFilled(b, iter->pos_in_bucket)) {
             /* No entry here. */
