@@ -68,8 +68,8 @@ static void *RDBThreadMain(void *myid) {
 
 /* --------- RDB Threads Lifecycle Management --------- */
 
-/* We only need a small queue for RDB Save because we processes hashtables sequentially.
- * RDB Load may need larger queues. */
+/* We only need a small queue for RDB Save because we processes hashtables sequentially (in cluster mode).
+ * RDB Load needs larger queues. */
 static void createRDBThread(int id, int job_queue_size) {
     serverAssert(server.rdb_threads_num > 0);
     serverAssert(id > 0 && id < server.rdb_threads_num);
@@ -126,7 +126,7 @@ void initRDBThreads(int per_thread_queue_size) {
 
 static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio *rdb, long *key_counter, char *pname, long long * info_updated_time) {
     RdbSaveThreadArgs *threadArgs = zcalloc(num_threads * sizeof(RdbSaveThreadArgs));
-    pthread_mutex_t *shared_rdb_write_mutex = zmalloc(sizeof(pthread_mutex_t)); // Shared amongst all threads
+    pthread_mutex_t *shared_rdb_write_mutex = zmalloc(sizeof(pthread_mutex_t)); /* Shared access to the rdb */
     pthread_mutex_init(shared_rdb_write_mutex, NULL);
 
     for (int i = 0; i < num_threads; i++) {
@@ -202,7 +202,6 @@ void updateParentProcessWithSaveInfo(MainThreadRdbInfo *reporting_info) {
 
 /* Job handler for RDB worker threads: encodes a range of hashtable buckets. */
 void rdbEncodeHashtableRange(void *arg) {
-    /* Step 1: Extract the thread arguments */
     RdbSaveThreadArgs *args = (RdbSaveThreadArgs *)arg;
     serverDb *db = server.db[args->dbid];
     hashtable *ht = args->ht;
@@ -230,7 +229,7 @@ void rdbEncodeHashtableRange(void *arg) {
         size_t processed_bytes_after = buf_to_file_rio->processed_bytes;
 
         if (res < 0 ) {
-            /* Release lock if we aquired it */
+            /* Release shared lock if we aquired it */
             if (buf_to_file_rio->io.buf_to_file.cap_reached) pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
             goto werr;
         }
@@ -240,13 +239,13 @@ void rdbEncodeHashtableRange(void *arg) {
                 1. Unlock the mutex that was aquired in rioBufferToFileWrite
                 2. Clear the buffer since it was already written to the file in rioBufferToFileWrite
             */
-            serverLog(LL_NOTICE, "Thread %d releasing lock in rdbEncodeHashtableRange", getThreadID());
             pthread_mutex_unlock(args->rdb_write_mutex);
             clearRioBufferToFile(buf_to_file_rio);
 
         } else if (buf_to_file_rio->processed_bytes > (size_t) WORKER_BUFFER_DEFAULT_SIZE) {
             /* We did not hit the memory cap, but we have enough data to write out*/
             pthread_mutex_lock(args->rdb_write_mutex);
+            /* Write data to the RDB file using the buffered data stored in buf_to_file_rio*/
             res = rdbWriteRaw(args->rdb, buf_to_file_rio->io.buf_to_file.ptr, buf_to_file_rio->processed_bytes);
             pthread_mutex_unlock(args->rdb_write_mutex);
             
@@ -343,7 +342,7 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
             JobQueue *jq = &rdb_jobs[i];
             if (JobQueue_isFull(jq)) goto werr;
             JobQueue_push(jq, rdbEncodeHashtableRange, ta);
-            pthread_mutex_unlock(&rdb_threads_mutex[i]); /* Unlock thread now that it has a job */
+            pthread_mutex_unlock(&rdb_threads_mutex[i]); /* Allow thread to begin its job */
         }
         /* Main thread processes its portion of the hashtable. */
         rdbEncodeHashtableRange(&threadArgs[0]);
