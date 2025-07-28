@@ -1233,11 +1233,6 @@ int hashtableIsRehashing(hashtable *ht) {
     return ht->rehash_idx != -1;
 }
 
-/* Returns the Rehash Index of the hashtable */
-int hashtableRehashIndex(hashtable *ht) {
-    return ht->rehash_idx;
-}
-
 /* Provides the number of buckets in the old and new tables during rehashing. To
  * get the sizes in bytes, multiply by HASHTABLE_BUCKET_SIZE. This function can
  * only be used when rehashing is in progress, and from the rehashingStarted and
@@ -2097,7 +2092,7 @@ int hashtableNext(hashtableIterator *iterator, void **elemptr) {
  * This handles hashtables undergoing rehashing by mapping the logical index
  * across `tables[0]` (unrehashed) and `tables[1]` (rehashed). */
 static BucketLocation logicalBucketIndexToBucketLocation(hashtable *ht, size_t logical_index) {
-    size_t rehash_idx = hashtableIsRehashing(ht) ? hashtableRehashIndex(ht) : 0;
+    size_t rehash_idx = hashtableIsRehashing(ht) ? ht->rehash_idx : 0;
     size_t n0 = numBuckets(ht->bucket_exp[0]);
     size_t n1 = numBuckets(ht->bucket_exp[1]);
 
@@ -2134,7 +2129,7 @@ static BucketLocation logicalBucketIndexToBucketLocation(hashtable *ht, size_t l
  * This is needed to 'stride' to the next bucket in hashtableStrideNext */
 static size_t BucketLocationToLogicalBucketIndex(hashtable *ht, BucketLocation bucket_loc) {
     assert(bucket_loc.table_index < 2); // valid table indices are 0 and 1
-    size_t rehash_idx = hashtableIsRehashing(ht) ? hashtableRehashIndex(ht) : 0;
+    size_t rehash_idx = hashtableIsRehashing(ht) ? ht->rehash_idx : 0;
     size_t n0 = numBuckets(ht->bucket_exp[0]);
 
     /* Calculate the number of 'live' buckets in `tables[0]` that are still active. */
