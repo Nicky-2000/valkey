@@ -110,7 +110,7 @@ static off_t rioBufferToFileTell(rio *r) {
     return r->io.buf_to_file.pos;
 }
 
-/* Flushes buffer to underlying rio.
+/* Flushes buffer to underlying rio. Resets the buffer on success.
  * Returns 1 on success and 0 on failures. */
 static int rioBufferToFileFlush(rio *r) {
     int ret = 1;
@@ -120,13 +120,12 @@ static int rioBufferToFileFlush(rio *r) {
             ret = 0;
         } else {
             // Buffer successfully flushed, clear its state.
-            sdsfree(r->io.buf_to_file.ptr);
-            r->io.buf_to_file.ptr = sdsempty();
+            sdsclear(r->io.buf_to_file.ptr);
             r->io.buf_to_file.pos = 0;
-            r->io.buf_to_file.cap_reached = 0; // Allow re-buffering after explicit flush
+            r->io.buf_to_file.cap_reached = 0;
         }
         pthread_mutex_unlock(r->io.buf_to_file.underlying_rio_mutex);
-        if (ret == 0) return 0; // Return on internal buffer write failure
+        if (ret == 0) return 0;
     }
     return 1;
 }

@@ -34,8 +34,7 @@ typedef struct RdbSaveThreadArgs {
     atomic_long keys_processed;
     ssize_t bytes_written;
     rio buf_to_file_rio;                // In-memory buffer (with max capacity) for key serialization
-    rio *rdb;                            // The final target rio implementation
-    pthread_mutex_t* rdb_write_mutex;   // Protects access to *rdb
+    pthread_mutex_t* rdb_write_mutex;   // Protects access to underlying mutex in buf_to_file_rio
     int save_status;
     MainThreadRdbInfo* main_thread_report_info; // Reporting info (only set for main thread's args)
 } RdbSaveThreadArgs;
