@@ -88,4 +88,7 @@ int kvstoreHashtablePop(kvstore *kvs, int didx, const void *key, void **popped);
 int kvstoreHashtableDelete(kvstore *kvs, int didx, const void *key);
 hashtable *kvstoreGetHashtable(kvstore *kvs, int didx);
 
+void kvstorePauseRehashing(kvstore *kvs, int didx);
+void kvstoreResumeRehashing(kvstore *kvs, int didx);
+
 #endif /* KVSTORE_H */

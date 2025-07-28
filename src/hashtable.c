@@ -49,6 +49,7 @@
 #include "zmalloc.h"
 #include "mt19937-64.h"
 #include "monotonic.h"
+#include "server.h"
 #include "config.h"
 
 #include <limits.h>
@@ -630,6 +631,7 @@ static int resize(hashtable *ht, size_t min_capacity, int *malloc_failed) {
         while (hashtableIsRehashing(ht)) {
             rehashStep(ht);
         }
+        serverLog(LL_NOTICE, "EXPAND DONE");
     }
 
     if (resize_policy == HASHTABLE_RESIZE_FORBID && ht->tables[0]) {
@@ -1194,12 +1196,13 @@ void hashtableResumeAutoShrink(hashtable *ht) {
 /* Pauses incremental rehashing. When rehashing is paused, bucket chains are not
  * automatically compacted when entries are deleted. Doing so may leave empty
  * spaces, "holes", in the bucket chains, which wastes memory. */
-static void hashtablePauseRehashing(hashtable *ht) {
+void hashtablePauseRehashing(hashtable *ht) {
+    serverLog(LL_NOTICE, "Paushing hashtableeeee");
     ht->pause_rehash++;
 }
 
 /* Resumes incremental rehashing, after pausing it. */
-static void hashtableResumeRehashing(hashtable *ht) {
+void hashtableResumeRehashing(hashtable *ht) {
     ht->pause_rehash--;
 }
 

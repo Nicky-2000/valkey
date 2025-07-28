@@ -41,6 +41,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include "server.h"
 
 #include "zmalloc.h"
 #include "kvstore.h"
@@ -105,6 +106,17 @@ static hashtable **kvstoreGetHashtableRef(kvstore *kvs, int didx) {
 static int kvstoreHashtableIsRehashingPaused(kvstore *kvs, int didx) {
     hashtable *ht = kvstoreGetHashtable(kvs, didx);
     return ht ? hashtableIsRehashingPaused(ht) : 0;
+}
+
+void kvstorePauseRehashing(kvstore *kvs, int didx) {
+    hashtable *ht = kvstoreGetHashtable(kvs, didx);
+    serverLog(LL_NOTICE, "PAUSING REHAASHING");
+    hashtablePauseRehashing(ht);
+}
+
+void kvstoreResumeRehashing(kvstore *kvs, int didx) {
+    hashtable *ht = kvstoreGetHashtable(kvs, didx);
+    hashtableResumeRehashing(ht);
 }
 
 /* Returns total (cumulative) number of keys up until given hashtable-index (inclusive).

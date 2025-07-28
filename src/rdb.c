@@ -1446,7 +1446,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
 
     /* save functions */
     if (!(req & REPLICA_REQ_RDB_EXCLUDE_FUNCTIONS) && rdbSaveFunctions(rdb) == -1) goto werr;
-    
+
     /* Start the RDB Threads that will be used for Saving */
     if (server.rdb_threads_num > 1) {
         initRDBThreads(RDB_SAVE_JOB_QUEUE_SIZE);
@@ -1458,7 +1458,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
             if (rdbSaveDb(rdb, j, rdbflags, &key_counter) == -1) goto werr;
         }
     }
-    
+
     /* Kill the RDB threads if they were initialized */
     if (server.rdb_threads_num > 1) {
         killRDBThreads();
@@ -3077,11 +3077,28 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
         serverLog(LL_WARNING, "Can't handle RDB format version %d", rdbver);
         return C_ERR;
     }
+    serverLog(LL_NOTICE, "Starting RDB Load");
 
     /* Key-specific attributes, set by opcodes before the key type. */
     long long lru_idle = -1, lfu_freq = -1, expiretime = -1, now = mstime();
     long long lru_clock = LRU_CLOCK();
 
+    pthread_mutex_t *key_insert_mutex = NULL; // Initialize to NULL
+    key_insert_mutex = zmalloc(sizeof(pthread_mutex_t));
+
+    if (server.rdb_threads_num > 1) {
+        initRDBThreads(2048); // Random number of tasks for now
+        if (pthread_mutex_init(key_insert_mutex, NULL) != 0) {
+            serverLog(LL_WARNING, "Failed to initialize RDB insert mutex.");
+            zfree(key_insert_mutex); // Free the allocated memory
+            return C_ERR;
+        }
+        serverLog(LL_NOTICE, "Making threads and mutex");
+        startRDBThreads();
+    }
+    long long rdb_thread_tasks_counter = 0;
+
+    int expand_done = 0;
     while (1) {
         sds key;
         robj *val;
@@ -3135,10 +3152,12 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             db = rdb_loading_ctx->dbarray[dbid];
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_RESIZEDB) {
+            
             /* RESIZEDB: Hint about the size of the keys in the currently
              * selected data base, in order to avoid useless rehashing. */
             if ((db_size = rdbLoadLen(rdb, NULL)) == RDB_LENERR) goto eoferr;
             if ((expires_size = rdbLoadLen(rdb, NULL)) == RDB_LENERR) goto eoferr;
+            serverLog(LL_NOTICE, "Found Resize Info: db_size %lu, expires_size %lu", db_size, expires_size);
             should_expand_db = 1;
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_AUX) {
@@ -3208,6 +3227,33 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
                     kvstoreHashtableExpand(db->expires, slot_id, expires_slot_size);
                     should_expand_db = 0;
                 }
+
+            } else if (!strcasecmp(auxkey->ptr, "rdb-thread-chunk")) {
+                if (should_expand_db && !expand_done) {
+                    expand_done = 1;
+                    dbExpand(db, db_size, 0);
+                    dbExpandExpires(db, expires_size, 0);
+                    should_expand_db = 0;
+                    kvstorePauseRehashing(db->keys, 0);
+                    // kvstorePauseRehashing(db->expires, 0);
+                }
+                serverLog(LL_NOTICE, "Found rdb-thread-chunk");
+
+                unsigned long chunk_size;
+                if (sscanf(auxval->ptr, "%lu", &chunk_size) < 1) {
+                    decrRefCount(auxkey);
+                    decrRefCount(auxval);
+                    goto eoferr;
+                }
+                serverLog(LL_NOTICE, "Found Chunk Size: %lu", chunk_size);
+                // rioRead(rdb, new buf, chunk_size);
+                offloadRDBChunkToThread(rdb, chunk_size, rdbver, db, rdbflags, key_insert_mutex, dbid, rdb_thread_tasks_counter);
+
+                // Read the whole chunk in raw....
+                // Pass the chunk to a thread
+                rdb_thread_tasks_counter++;
+
+                // Pass the chunk of data to a thread. Which will process the data as just keys.
             } else {
                 /* Check if this is a dynamic aux field */
                 int handled = 0;
@@ -3425,13 +3471,29 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             }
         }
     }
+    if (server.rdb_threads_num > 1) {
+        drainRDBThreadsQueue();
 
+        
+    }
+    kvstoreResumeRehashing(db->keys, 0);
+    // kvstoreResumeRehashing(db->expires, 0);
     if (empty_keys_skipped) {
         serverLog(LL_NOTICE, "Done loading RDB, keys loaded: %lld, keys expired: %lld, empty keys skipped: %lld.",
                   server.rdb_last_load_keys_loaded, server.rdb_last_load_keys_expired, empty_keys_skipped);
     } else {
         serverLog(LL_NOTICE, "Done loading RDB, keys loaded: %lld, keys expired: %lld.",
                   server.rdb_last_load_keys_loaded, server.rdb_last_load_keys_expired);
+    }
+    if (key_insert_mutex != NULL) {
+        // In an error scenario, you might need to try to stop/cancel pending
+        // thread jobs before destroying the mutex.
+        pthread_mutex_destroy(key_insert_mutex);
+        zfree(key_insert_mutex);
+    }
+    stopRDBThreads();
+    if (server.rdb_threads_num > 1) {
+        killRDBThreads();
     }
     return C_OK;
 
@@ -3440,8 +3502,18 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
      * the RDB file from a socket during initial SYNC (diskless replica mode),
      * we'll report the error to the caller, so that we can retry. */
 eoferr:
+    stopRDBThreads();
     serverLog(LL_WARNING, "Short read or OOM loading DB. Unrecoverable error, aborting now.");
     rdbReportReadError("Unexpected EOF reading RDB file");
+    if (server.rdb_threads_num > 1) {
+        killRDBThreads();
+    }
+    if (key_insert_mutex != NULL) {
+        // In an error scenario, you might need to try to stop/cancel pending
+        // thread jobs before destroying the mutex.
+        pthread_mutex_destroy(key_insert_mutex);
+        zfree(key_insert_mutex);
+    }
     return C_ERR;
 }
 
