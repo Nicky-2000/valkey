@@ -1025,7 +1025,7 @@ static bucket *getNextBucket(bucket *current_bucket, size_t next_top_level_index
 
 /* This function prefetches data that will be needed in subsequent iterations:
  * - The entries of the next bucket
- * - The structure of the next of the next bucket
+ * - The next of the next bucket
  * It attempts to bring this data closer to the L1 cache to reduce future memory access latency.
  *
  * Cache state before this function is called (due to last call for this function):
@@ -1034,7 +1034,6 @@ static bucket *getNextBucket(bucket *current_bucket, size_t next_top_level_index
  */
 static void prefetchNextBucketEntries(iter *iter, bucket *current_bucket, size_t stride) {
     size_t next_top_level_index = iter->index + stride;
-
     bucket *next_bucket = getNextBucket(current_bucket, next_top_level_index, iter->hashtable, iter->table);
     if (next_bucket) {
         prefetchBucketEntries(next_bucket);
