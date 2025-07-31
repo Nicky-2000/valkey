@@ -6,6 +6,7 @@
 
 #include "rdb_threads.h"
 #include "thread_common.h"
+#include "rdb.h"
 
 static pthread_t rdb_threads[RDB_THREADS_MAX_NUM] = {0};
 static pthread_mutex_t rdb_threads_mutex[RDB_THREADS_MAX_NUM];
@@ -18,16 +19,18 @@ static void *RDBThreadMain(void *myid) {
     /* The ID is the thread ID number (from 1 to server.rdb_threads_num-1). ID 0 is the main thread. */
     long id = (long)myid;
     char thdname[32];
+    thread_id = (int)id; // Thread local var defined in thread_common.h
 
     snprintf(thdname, sizeof(thdname), "rdb_thd_%ld", id);
     valkey_set_thread_title(thdname);
+
+    /* Threads may allocate a static buffer in rdbSaveLzfStringObject to store compressed strings. */
+    pthread_cleanup_push(freeThreadCompressionBuffer, NULL);
 
     /*
         Note: CPU Affinity for rdb save cab be added here using:
         'serverSetCpuAffinity(server.rdb_threads_cpulist)'
     */
-
-    thread_id = (int)id; // Thread local var defined in thread_common.h
     size_t jobs_to_process = 0;
     JobQueue *jq = &rdb_jobs[id];
     while (1) {
@@ -62,6 +65,9 @@ static void *RDBThreadMain(void *myid) {
          * As the main-thread main concern is to check if the queue is empty, it's enough to do it once at the end. */
         atomic_thread_fence(memory_order_release);
     }
+
+    pthread_cleanup_pop(0);
+
     return NULL;
 }
 
@@ -98,7 +104,7 @@ static void shutdownRDBThread(int id) {
     if ((err = pthread_join(tid, NULL)) != 0) {
         serverLog(LL_WARNING, "RDB thread(tid:%lu) can not be joined: %s", (unsigned long)tid, strerror(err));
     } else {
-        serverLog(LL_NOTICE, "RDB thread(tid:%lu) terminated", (unsigned long)tid);
+        serverLog(LL_DEBUG, "RDB thread(tid:%lu) terminated", (unsigned long)tid);
     }
     pthread_mutex_destroy(&rdb_threads_mutex[id]);
     JobQueue_cleanup(&rdb_jobs[id]);
@@ -181,7 +187,7 @@ void rdbEncodeHashtableRange(void *arg) {
     rio *buf_to_file_rio = &args->buf_to_file_rio;
 
     hashtableIterator ht_iter;
-    hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_PREFETCH_VALUES);
+    hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
     void *next;
     ssize_t res;
 

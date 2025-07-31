@@ -2197,7 +2197,12 @@ int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t logi
     while (1) {
         if (iter->index == -1 && iter->table == 0) {
             /* It's the first call to next. */
-            iter->fingerprint = hashtableFingerprint(iter->hashtable);
+            if (isSafe(iter)) {
+                hashtablePauseRehashing(iter->hashtable);
+            } else {
+                iter->fingerprint = hashtableFingerprint(iter->hashtable);
+            }
+            
             if (iter->hashtable->tables[iter->table] == NULL) {
                 /* Empty hashtable. We're done. */
                 break;

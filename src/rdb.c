@@ -398,25 +398,35 @@ writeerr:
     return -1;
 }
 
+__thread void *static_comp_buf = NULL;
+
 ssize_t rdbSaveLzfStringObject(rio *rdb, unsigned char *s, size_t len) {
     size_t comprlen, outlen;
     void *out;
-    static void *buffer = NULL;
 
     /* We require at least four bytes compression for this to be worth it */
     if (len <= 4) return 0;
     outlen = len - 4;
     if (outlen < LZF_STATIC_BUFFER_SIZE) {
-        if (!buffer) buffer = zmalloc(LZF_STATIC_BUFFER_SIZE);
-        out = buffer;
+        if (!static_comp_buf) static_comp_buf = zmalloc(LZF_STATIC_BUFFER_SIZE);
+        out = static_comp_buf;
     } else {
         if ((out = zmalloc(outlen + 1)) == NULL) return 0;
     }
     comprlen = lzf_compress(s, len, out, outlen);
     ssize_t nwritten = comprlen ? rdbSaveLzfBlob(rdb, out, comprlen, len) : 0;
-    if (out != buffer) zfree(out);
+    if (out != static_comp_buf) zfree(out);
     return nwritten;
 }
+
+void freeThreadCompressionBuffer(void *dummy) {
+    UNUSED(dummy);
+    if (static_comp_buf) {
+        zfree(static_comp_buf);
+        static_comp_buf = NULL;
+    }
+}
+
 
 /* Load an LZF compressed string in RDB format. The returned value
  * changes according to 'flags'. For more info check the
@@ -452,7 +462,11 @@ void *rdbLoadLzfStringObject(rio *rdb, int flags, size_t *lenptr) {
 
     /* Load the compressed representation and uncompress it to target. */
     if (rioRead(rdb, c, clen) == 0) goto err;
-    if (lzf_decompress(c, clen, val, len) != len) {
+    size_t out_len = lzf_decompress(c, clen, val, len); 
+    if (out_len != len) {
+        serverLog(LL_NOTICE,"Data: %hhn", c);
+
+        serverLog(LL_NOTICE, "Got compressed len %ld, expected out len: %ld, actual out len %ld", clen, len, out_len);
         rdbReportCorruptRDB("Invalid LZF compressed string");
         goto err;
     }
