@@ -187,7 +187,7 @@ void rdbEncodeHashtableRange(void *arg) {
     rio *buf_to_file_rio = &args->buf_to_file_rio;
 
     hashtableIterator ht_iter;
-    hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES);
+    hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_PREFETCH_VALUES);
     void *next;
     ssize_t res;
 
@@ -231,7 +231,7 @@ void rdbEncodeHashtableRange(void *arg) {
         }
 
         args->bytes_written += res;
-        atomic_fetch_add(&args->keys_processed, 1);
+        atomic_fetch_add_explicit(&args->keys_processed, 1, memory_order_release);
 
         /* In fork child process, we can try to release memory back to the
          * OS and possibly avoid or decrease COW. We give the dismiss
@@ -244,7 +244,7 @@ void rdbEncodeHashtableRange(void *arg) {
             MainThreadRdbInfo *reporting_info = args->main_thread_report_info;
             long total_keys_processed = 0;
             for (int i = 0; i < server.rdb_threads_num; i++) {
-                total_keys_processed += atomic_load(&reporting_info->threadArgs[i].keys_processed);
+                total_keys_processed += atomic_load_explicit(&reporting_info->threadArgs[i].keys_processed, memory_order_relaxed);
             }
 
             /* Update child info periodically to avoid excessive `mstime()` calls and parent notifications. */
@@ -316,6 +316,8 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
             last_slot = curr_slot;
         }
 
+        hashtablePauseRehashing(ht);
+
         /* 2.2. Assign a range of the current hashtable to each RDB thread. */
         for (int i = 0; i < server.rdb_threads_num; i++) {
             RdbSaveThreadArgs *ta = &threadArgs[i];
@@ -339,6 +341,7 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
 
         /* 2.3. Wait for all threads to complete their jobs. */
         drainRDBThreadsQueue();
+        hashtableResumeRehashing(ht);
 
         /* 2.4. Pause worker threads until their next job assignment. */
         for (int i = 1; i < server.rdb_threads_num; i++) {
@@ -354,8 +357,8 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
     /* 4. Aggregate total bytes written and keys processed from all threads. */
     long long total_keys_written = 0;
     for (int i = 0; i < server.rdb_threads_num; i++) {
+        total_keys_written += atomic_load_explicit(&threadArgs[i].keys_processed, memory_order_acquire);
         written += threadArgs[i].bytes_written;
-        total_keys_written += atomic_load(&threadArgs[i].keys_processed);
     }
 
     kvstoreIteratorRelease(kvs_it);

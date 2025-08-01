@@ -1214,12 +1214,12 @@ void hashtableResumeAutoShrink(hashtable *ht) {
 /* Pauses incremental rehashing. When rehashing is paused, bucket chains are not
  * automatically compacted when entries are deleted. Doing so may leave empty
  * spaces, "holes", in the bucket chains, which wastes memory. */
-static void hashtablePauseRehashing(hashtable *ht) {
+void hashtablePauseRehashing(hashtable *ht) {
     ht->pause_rehash++;
 }
 
 /* Resumes incremental rehashing, after pausing it. */
-static void hashtableResumeRehashing(hashtable *ht) {
+void hashtableResumeRehashing(hashtable *ht) {
     ht->pause_rehash--;
 }
 
@@ -2197,12 +2197,8 @@ int hashtableStrideNext(hashtableIterator *iterator, void **elemptr, size_t logi
     while (1) {
         if (iter->index == -1 && iter->table == 0) {
             /* It's the first call to next. */
-            if (isSafe(iter)) {
-                hashtablePauseRehashing(iter->hashtable);
-            } else {
-                iter->fingerprint = hashtableFingerprint(iter->hashtable);
-            }
-            
+            iter->fingerprint = hashtableFingerprint(iter->hashtable);
+
             if (iter->hashtable->tables[iter->table] == NULL) {
                 /* Empty hashtable. We're done. */
                 break;
