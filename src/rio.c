@@ -57,84 +57,83 @@
 #include "server.h"
 #include "connhelpers.h"
 
-/* ------------------------- Memory Capped Buffer I/O  ----------------------- */
+/* ------------------------- Memory Capped Buffer I/O to an Underlying Stream ----------------------- */
 
 /* Returns 1 or 0 for success/failure. */
-static size_t rioBufferToFileWrite(rio *r, const void *buf, size_t len) {
+static size_t rioBufferToUnderlyingWrite(rio *r, const void *buf, size_t len) {
     /* Attempt to buffer data in memory if capacity allows. */
-    if (!r->io.buf_to_file.cap_reached && ((size_t)r->io.buf_to_file.pos + len) <= r->io.buf_to_file.max_buffer_size){
-        r->io.buf_to_file.ptr = sdscatlen(r->io.buf_to_file.ptr, (char *)buf, len);
-        r->io.buf_to_file.pos += len;
+    if (!r->io.buf_to_underlying.cap_reached && ((size_t)r->io.buf_to_underlying.pos + len) <= r->io.buf_to_underlying.max_buffer_size){
+        r->io.buf_to_underlying.ptr = sdscatlen(r->io.buf_to_underlying.ptr, (char *)buf, len);
+        r->io.buf_to_underlying.pos += len;
         return 1; /* Data Successfully Buffered */
     }
 
     /* Transition to direct write if buffer cap reached or current write overflows. */
-    if (!r->io.buf_to_file.cap_reached) { 
+    if (!r->io.buf_to_underlying.cap_reached) { 
         /* First time hitting the memory cap. 
          * We enter this block a maximum of 1 time per rdbSaveKeyValuePair() call in rdbEncodedHashtableRange */
-        r->io.buf_to_file.cap_reached = 1;
+        r->io.buf_to_underlying.cap_reached = 1;
 
         
         /* Aquire underlying rio mutex. The caller (rdbEncodedHashtableRange) is responsible 
          * for unlocking the mutex once the current key has been fully streamed out.  
          * The caller knows to release the mutex if cap_reached = 1.
          */
-        pthread_mutex_lock(r->io.buf_to_file.underlying_rio_mutex); 
+        pthread_mutex_lock(r->io.buf_to_underlying.underlying_rio_mutex); 
 
         /* Dump existing buffered data to underlying RIO. */
-        if (r->io.buf_to_file.pos > 0) {
-            if (rdbWriteRaw(r->io.buf_to_file.underlying_rio, r->io.buf_to_file.ptr, r->io.buf_to_file.pos) < 0) {
-                pthread_mutex_unlock(r->io.buf_to_file.underlying_rio_mutex); /* Release lock on error. */
+        if (r->io.buf_to_underlying.pos > 0) {
+            if (rdbWriteRaw(r->io.buf_to_underlying.underlying_rio, r->io.buf_to_underlying.ptr, r->io.buf_to_underlying.pos) < 0) {
+                pthread_mutex_unlock(r->io.buf_to_underlying.underlying_rio_mutex); /* Release lock on error. */
                 return 0;
             }
         }
-        // The caller (rdbEncodeHashtableRange) is responsible for clearing r->io.buf_to_file.ptr/pos.
+        // The caller (rdbEncodeHashtableRange) is responsible for clearing r->io.buf_to_underlying.ptr/pos.
     }
 
     /* Write current data directly to the underlying RIO.
      * The mutex for underlying RIO must be held by this thread if `cap_reached` is true. */
-    if (rdbWriteRaw(r->io.buf_to_file.underlying_rio, buf, len) < 0) return 0;
+    if (rdbWriteRaw(r->io.buf_to_underlying.underlying_rio, buf, len) < 0) return 0;
     return 1;
 }
 
 /* Returns 1 or 0 for success/failure. */
-static size_t rioBufferToFileRead(rio *r, void *buf, size_t len) {
-    if (sdslen(r->io.buf_to_file.ptr) - r->io.buf_to_file.pos < len) return 0; /* not enough buffer to return len bytes. */
-    memcpy(buf, r->io.buf_to_file.ptr + r->io.buf_to_file.pos, len);
-    r->io.buf_to_file.pos += len;
+static size_t rioBufferToUnderlyingRead(rio *r, void *buf, size_t len) {
+    if (sdslen(r->io.buf_to_underlying.ptr) - r->io.buf_to_underlying.pos < len) return 0; /* not enough buffer to return len bytes. */
+    memcpy(buf, r->io.buf_to_underlying.ptr + r->io.buf_to_underlying.pos, len);
+    r->io.buf_to_underlying.pos += len;
     return 1;
 }
 
 /* Returns read/write position in buffer. */
-static off_t rioBufferToFileTell(rio *r) {
-    return r->io.buf_to_file.pos;
+static off_t rioBufferToUnderlyingTell(rio *r) {
+    return r->io.buf_to_underlying.pos;
 }
 
 /* Flushes buffer to underlying rio. Resets the buffer on success.
  * Returns 1 on success and 0 on failures. */
-static int rioBufferToFileFlush(rio *r) {
-    int ret = 1;
-    if (r->io.buf_to_file.pos > 0) {
-        pthread_mutex_lock(r->io.buf_to_file.underlying_rio_mutex);
-        if (rdbWriteRaw(r->io.buf_to_file.underlying_rio, r->io.buf_to_file.ptr, r->io.buf_to_file.pos) < 0) {
-            ret = 0;
-        } else {
-            // Buffer successfully flushed, clear its state.
-            sdsclear(r->io.buf_to_file.ptr);
-            r->io.buf_to_file.pos = 0;
-            r->io.buf_to_file.cap_reached = 0;
-        }
-        pthread_mutex_unlock(r->io.buf_to_file.underlying_rio_mutex);
-        if (ret == 0) return 0;
-    }
+static int rioBufferToUnderlyingFlush(rio *r) {
+    if (r->io.buf_to_underlying.pos == 0) return 1;
+
+    pthread_mutex_lock(r->io.buf_to_underlying.underlying_rio_mutex);
+    if (rdbWriteRaw(r->io.buf_to_underlying.underlying_rio, r->io.buf_to_underlying.ptr, r->io.buf_to_underlying.pos) < 0) {
+        pthread_mutex_unlock(r->io.buf_to_underlying.underlying_rio_mutex);
+        return 0;
+    } 
+    pthread_mutex_unlock(r->io.buf_to_underlying.underlying_rio_mutex);
+    
+    /* Buffer successfully flushed, clear its state. */
+    sdsclear(r->io.buf_to_underlying.ptr);
+    r->io.buf_to_underlying.pos = 0;
+    r->io.buf_to_underlying.cap_reached = 0;
     return 1;
 }
 
-static const rio rioBufferToFileIO = {
-    rioBufferToFileRead,
-    rioBufferToFileWrite,
-    rioBufferToFileTell,
-    rioBufferToFileFlush,
+static const rio rioBufferToUnderlyingIO = {
+    rioBufferToUnderlyingRead,
+    rioBufferToUnderlyingWrite,
+    rioBufferToUnderlyingTell,
+    rioBufferToUnderlyingFlush,
     NULL,       /* update_checksum */
     0,          /* current checksum */
     0,          /* flags */
@@ -143,14 +142,14 @@ static const rio rioBufferToFileIO = {
     {{NULL, 0}} /* union for io-specific vars */
 };
 
-void rioInitWithBufferToFile(rio *r, sds s, size_t max_buffer_size, rio* underlying_rio, pthread_mutex_t *underlying_rio_mutex) {
-    *r = rioBufferToFileIO;
-    r->io.buf_to_file.ptr = s;
-    r->io.buf_to_file.pos = 0;
-    r->io.buf_to_file.max_buffer_size = max_buffer_size;
-    r->io.buf_to_file.cap_reached = 0;
-    r->io.buf_to_file.underlying_rio = underlying_rio;
-    r->io.buf_to_file.underlying_rio_mutex = underlying_rio_mutex;
+void rioInitWithBufferToUnderlying(rio *r, sds s, size_t max_buffer_size, rio* underlying_rio, pthread_mutex_t *underlying_rio_mutex) {
+    *r = rioBufferToUnderlyingIO;
+    r->io.buf_to_underlying.ptr = s;
+    r->io.buf_to_underlying.pos = 0;
+    r->io.buf_to_underlying.max_buffer_size = max_buffer_size;
+    r->io.buf_to_underlying.cap_reached = 0;
+    r->io.buf_to_underlying.underlying_rio = underlying_rio;
+    r->io.buf_to_underlying.underlying_rio_mutex = underlying_rio_mutex;
 }
 
 /* ------------------------- Buffer I/O implementation ----------------------- */

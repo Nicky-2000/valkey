@@ -1031,6 +1031,9 @@ static bucket *getNextBucket(bucket *current_bucket, size_t next_top_level_index
  * Cache state before this function is called (due to last call for this function):
  * 1. The current bucket and its entries are likely already in cache.
  * 2. The next bucket is in cache.
+ * 
+ * The stride variable determines how many top level buckets to jump forward. If we complete
+ * a bucket chain, we "stride forward" to the next top-level bucket index.
  */
 static void prefetchNextBucketEntries(iter *iter, bucket *current_bucket, size_t stride) {
     size_t next_top_level_index = iter->index + stride;

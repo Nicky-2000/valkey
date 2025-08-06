@@ -4,10 +4,10 @@
 #include "server.h"
 #include "thread_common.h"
 
-/* Threshold for flushing a worker's buffer to the main RDB file (4MB). */
-#define WORKER_BUFFER_DEFAULT_SIZE  4*(1024*1024)      
-/* Maximum capacity for a worker's buffer. Keys causing this limit to be exceeded are streamed directly to RDB file (32MB). */
-#define WORKER_BUFFER_CAPACITY_LIMIT 32*(1024*1024)
+/* Threshold for flushing a worker's buffer to the main RDB file (64 KB). */
+#define WORKER_BUFFER_DEFAULT_SIZE  64*(1024)      
+/* Maximum capacity for a worker's buffer. Keys causing this limit to be exceeded are streamed directly to RDB file (256 KB). */
+#define WORKER_BUFFER_CAPACITY_LIMIT 256*(1024)
 
 #define RDB_SAVE_JOB_QUEUE_SIZE 2 // Minimum size of JobQueue
 
@@ -33,7 +33,7 @@ typedef struct RdbSaveThreadArgs {
     BucketStride bucket_stride;         // Defines what buckets in a hashtable the thread is responsible for
     atomic_long keys_processed;
     ssize_t bytes_written;
-    rio buf_to_file_rio;                // In-memory buffer (with max capacity) for key serialization
+    rio buf_to_underlying_rio;          // In-memory buffer (with max capacity) for key/val serialization
     pthread_mutex_t* rdb_write_mutex;   // Protects access to underlying mutex in buf_to_file_rio
     int save_status;
     MainThreadRdbInfo* main_thread_report_info; // Reporting info (only set for main thread's args)

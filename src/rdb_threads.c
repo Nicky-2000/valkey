@@ -141,7 +141,7 @@ static RdbSaveThreadArgs *createRdbSaveThreadArgs(int num_threads, int dbid, rio
         threadArgs[i].ht = NULL; // Set by the main thread in rdbSaveDbMultiThreaded for each hashtable in the database
         threadArgs[i].bucket_stride = (BucketStride){.start_index = i, .stride_size = num_threads};
         atomic_init(&threadArgs[i].keys_processed, 0);
-        rioInitWithBufferToFile(&threadArgs[i].buf_to_file_rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_DEFAULT_SIZE), WORKER_BUFFER_CAPACITY_LIMIT, rdb, shared_rdb_write_mutex);
+        rioInitWithBufferToUnderlying(&threadArgs[i].buf_to_underlying_rio, sdsnewlen(SDS_NOINIT, WORKER_BUFFER_DEFAULT_SIZE), WORKER_BUFFER_CAPACITY_LIMIT, rdb, shared_rdb_write_mutex);
         threadArgs[i].rdb_write_mutex = shared_rdb_write_mutex;
         threadArgs[i].save_status = C_OK;
 
@@ -163,7 +163,7 @@ static void freeRdbSaveThreadArgs(int num_threads, RdbSaveThreadArgs *threadArgs
     serverAssert(threadArgs != NULL);
 
     for (int i = 0; i < num_threads; i++) {
-        sdsfree(threadArgs[i].buf_to_file_rio.io.buf_to_file.ptr);
+        sdsfree(threadArgs[i].buf_to_underlying_rio.io.buf_to_underlying.ptr);
     }
     /* Free the shared write mutex one time*/
     pthread_mutex_destroy(threadArgs[0].rdb_write_mutex);
@@ -184,7 +184,7 @@ void rdbEncodeHashtableRange(void *arg) {
     serverDb *db = server.db[args->dbid];
     hashtable *ht = args->ht;
     BucketStride *bucket_stride = &args->bucket_stride;
-    rio *buf_to_file_rio = &args->buf_to_file_rio;
+    rio *buf_to_underlying_rio = &args->buf_to_underlying_rio;
 
     hashtableIterator ht_iter;
     hashtableInitIterator(&ht_iter, ht, HASHTABLE_ITER_PREFETCH_VALUES);
@@ -197,37 +197,37 @@ void rdbEncodeHashtableRange(void *arg) {
         sds keystr = objectGetKey(o);
         robj key;
         long long expire;
-        size_t processed_bytes_before = buf_to_file_rio->processed_bytes;
+        size_t processed_bytes_before = buf_to_underlying_rio->processed_bytes;
 
         initStaticStringObject(key, keystr);
         expire = getExpire(db, &key);
 
         /* Attempt to write key-value pair to the thread's local buffer. */
-        res = rdbSaveKeyValuePair(buf_to_file_rio, &key, o, expire, args->dbid);
-        size_t processed_bytes_after = buf_to_file_rio->processed_bytes;
+        res = rdbSaveKeyValuePair(buf_to_underlying_rio, &key, o, expire, args->dbid);
+        size_t processed_bytes_after = buf_to_underlying_rio->processed_bytes;
 
         if (res < 0) {
             /* Release shared lock if we aquired it */
-            if (buf_to_file_rio->io.buf_to_file.cap_reached) {
-                pthread_mutex_unlock(buf_to_file_rio->io.buf_to_file.underlying_rio_mutex);
+            if (buf_to_underlying_rio->io.buf_to_underlying.cap_reached) {
+                pthread_mutex_unlock(buf_to_underlying_rio->io.buf_to_underlying.underlying_rio_mutex);
             }
             goto werr;
         }
         /* Our write was successful. Check if we hit the memory cap while writing this key */
-        if (buf_to_file_rio->io.buf_to_file.cap_reached) {
+        if (buf_to_underlying_rio->io.buf_to_underlying.cap_reached) {
             /* If we hit the memory cap during the call to rdbSaveKeyValuePair we need too:
-                1. Unlock the mutex that was aquired in rioBufferToFileWrite
-                2. Clear the buffer since it was already written to the file in rioBufferToFileWrite
+                1. Unlock the mutex that was aquired in rioBufferToUnderlyingWrite
+                2. Clear the buffer since it was already written to the file in rioBufferToUnderlyingWrite
             */
             pthread_mutex_unlock(args->rdb_write_mutex);
 
-            sdsclear(buf_to_file_rio->io.buf_to_file.ptr);
-            buf_to_file_rio->io.buf_to_file.cap_reached = 0;
-            buf_to_file_rio->io.buf_to_file.pos = 0;
+            sdsclear(buf_to_underlying_rio->io.buf_to_underlying.ptr);
+            buf_to_underlying_rio->io.buf_to_underlying.cap_reached = 0;
+            buf_to_underlying_rio->io.buf_to_underlying.pos = 0;
 
-        } else if ((size_t)buf_to_file_rio->io.buf_to_file.pos > (size_t)WORKER_BUFFER_DEFAULT_SIZE) {
+        } else if ((size_t)buf_to_underlying_rio->io.buf_to_underlying.pos > (size_t)WORKER_BUFFER_DEFAULT_SIZE) {
             /* We did not hit the memory cap, but we have buffered enough data to write out*/
-            if (rioFlush(buf_to_file_rio) == 0) goto werr;
+            if (rioFlush(buf_to_underlying_rio) == 0) goto werr;
         }
 
         args->bytes_written += res;
@@ -260,8 +260,8 @@ void rdbEncodeHashtableRange(void *arg) {
     }
 
     /* Flush any remaining buffered data to the underlying_rio (RDB File). */
-    if ((size_t)buf_to_file_rio->io.buf_to_file.pos > 0) {
-        if (rioFlush(buf_to_file_rio) == 0) goto werr;
+    if ((size_t)buf_to_underlying_rio->io.buf_to_underlying.pos > 0) {
+        if (rioFlush(buf_to_underlying_rio) == 0) goto werr;
     }
 
     hashtableResetIterator(&ht_iter);
@@ -324,10 +324,10 @@ ssize_t rdbSaveDbMultiThreaded(rio *rdb, int dbid, long *key_counter, char *pnam
             ta->ht = ht;
 
             /* Reset buffer*/
-            sdsclear(ta->buf_to_file_rio.io.buf_to_file.ptr);
-            ta->buf_to_file_rio.io.buf_to_file.pos = 0;
-            ta->buf_to_file_rio.io.buf_to_file.cap_reached = 0;
-            ta->buf_to_file_rio.processed_bytes = 0;
+            sdsclear(ta->buf_to_underlying_rio.io.buf_to_underlying.ptr);
+            ta->buf_to_underlying_rio.io.buf_to_underlying.pos = 0;
+            ta->buf_to_underlying_rio.io.buf_to_underlying.cap_reached = 0;
+            ta->buf_to_underlying_rio.processed_bytes = 0;
 
             if (i == 0) continue; /* Main thread processes its job directly. Don't need to queue. */
 
