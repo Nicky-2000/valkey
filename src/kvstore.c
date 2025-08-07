@@ -49,7 +49,6 @@
 
 #define UNUSED(V) ((void)V)
 
-static hashtable *kvstoreIteratorNextHashtable(kvstoreIterator *kvs_it);
 
 struct _kvstore {
     int flags;
@@ -588,7 +587,7 @@ void kvstoreIteratorRelease(kvstoreIterator *kvs_it) {
 }
 
 /* Returns next hash table from the iterator, or NULL if iteration is complete. */
-static hashtable *kvstoreIteratorNextHashtable(kvstoreIterator *kvs_it) {
+hashtable *kvstoreIteratorNextHashtable(kvstoreIterator *kvs_it) {
     if (kvs_it->next_didx == -1) return NULL;
 
     /* The hashtable may be deleted during the iteration process, so here need to check for NULL. */
