@@ -57,7 +57,7 @@
 #include "server.h"
 #include "connhelpers.h"
 
-/* ------------------------- Memory Capped Buffer I/O to an Underlying Stream ----------------------- */
+/* ------------------------- Memory Capped Buffer I/O to an Underlying Rio ----------------------- */
 
 /* Returns 1 or 0 for success/failure. */
 static size_t rioBufferToUnderlyingWrite(rio *r, const void *buf, size_t len) {
