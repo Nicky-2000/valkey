@@ -1670,7 +1670,9 @@ int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
             serverSetProcTitle("valkey-rdb-bgsave");
         }
         serverSetCpuAffinity(server.bgsave_cpulist);
+        serverLog(LL_NOTICE, "Starting BGSAVE");
         retval = rdbSave(req, filename, rsi, rdbflags);
+        serverLog(LL_NOTICE, "Ending BGSAVE");
         if (retval == C_OK) {
             sendChildCowInfo(CHILD_INFO_TYPE_RDB_COW_SIZE, "RDB");
         }
