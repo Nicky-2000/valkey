@@ -1482,6 +1482,7 @@ int rdbSaveRio(int req, rio *rdb, int *error, int rdbflags, rdbSaveInfo *rsi) {
     }
 
     /* Kill the RDB threads if they were initialized */
+    serverLog(LL_NOTICE, "rdb-threads set to: %d", server.rdb_threads_num);
     if (server.rdb_threads_num > 1) {
         killRDBThreads();
     }
@@ -1615,7 +1616,7 @@ int rdbSaveToFile(const char *filename) {
 int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
     char tmpfile[256];
     char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
-
+    serverLog(LL_NOTICE, "STARTING RDB SAVE");
     startSaving(rdbflags);
     snprintf(tmpfile, 256, "temp-%d.rdb", (int)getpid());
 
@@ -1642,6 +1643,7 @@ int rdbSave(int req, char *filename, rdbSaveInfo *rsi, int rdbflags) {
         stopSaving(0);
         return C_ERR;
     }
+    serverLog(LL_NOTICE, "ENDING RDB SAVE");
 
     serverLog(LL_NOTICE, "DB saved on disk");
     server.dirty = 0;
