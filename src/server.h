@@ -113,6 +113,11 @@ struct hdr_histogram;
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
+
+extern long long g_rioFdWrite_syscall_total_duration_us;
+extern long long g_rioFdWrite_syscall_total_bytes;
+extern long long g_rioFdWrite_syscall_calls;
+
 /* Get the pointer of the outer struct from a member address */
 #define server_member2struct(struct_name, member_name, member_addr) \
     ((struct_name *)((char *)member_addr - offsetof(struct_name, member_name)))

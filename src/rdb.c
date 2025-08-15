@@ -1359,6 +1359,10 @@ werr:
 }
 
 ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
+    g_rioFdWrite_syscall_total_duration_us = 0;
+    g_rioFdWrite_syscall_total_bytes = 0;
+    g_rioFdWrite_syscall_calls = 0;
+
     ssize_t written = 0;
     ssize_t res;
     kvstoreIterator *kvs_it = NULL;
@@ -1389,9 +1393,20 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter) {
     if (server.rdb_threads_num > 1) {
         if ((res = rdbSaveDbMultiThreaded(rdb, dbid, key_counter, pname)) < 0) goto werr;
         written += res;
+        // --- NEW: Log stats here for multi-threaded path ---
+        serverLog(LL_NOTICE, "RDB Save DB %d (MultiThreaded) completed. "
+                             "rioFdWrite syscalls: %lld bytes in %lld us over %lld calls.",
+                             dbid, g_rioFdWrite_syscall_total_bytes,
+                             g_rioFdWrite_syscall_total_duration_us, g_rioFdWrite_syscall_calls);
+        // ----------------------------------------------------
         return written;
     }
-
+    // --- NEW: Log stats here for multi-threaded path ---
+        serverLog(LL_NOTICE, "RDB Save DB %d (MultiThreaded) completed. "
+                             "rioFdWrite syscalls: %lld bytes in %lld us over %lld calls.",
+                             dbid, g_rioFdWrite_syscall_total_bytes,
+                             g_rioFdWrite_syscall_total_duration_us, g_rioFdWrite_syscall_calls);
+        // ----------------------------------------------------
     kvs_it = kvstoreIteratorInit(db->keys, HASHTABLE_ITER_SAFE | HASHTABLE_ITER_PREFETCH_VALUES | HASHTABLE_ITER_INCLUDE_IMPORTING);
     int last_slot = -1;
     /* Iterate this DB writing every entry */

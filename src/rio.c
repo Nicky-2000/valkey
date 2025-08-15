@@ -413,6 +413,10 @@ void rioFreeConn(rio *r, sds *remaining) {
     r->io.conn.buf = NULL;
 }
 
+long long g_rioFdWrite_syscall_total_duration_us = 0;
+long long g_rioFdWrite_syscall_total_bytes = 0;
+long long g_rioFdWrite_syscall_calls = 0;
+
 /* ------------------- File descriptor implementation ------------------
  * This target is used to write the RDB file to pipe, when the primary just
  * streams the data to the replicas without creating an RDB on-disk image
@@ -428,6 +432,10 @@ static size_t rioFdWrite(rio *r, const void *buf, size_t len) {
     ssize_t retval;
     unsigned char *p = (unsigned char *)buf;
     int doflush = (buf == NULL && len == 0);
+    long long syscall_start_time = ustime(); // Start time for this syscall
+    long long syscall_end_time = ustime(); // End time for this syscall
+
+
 
     /* For small writes, we rather keep the data in user-space buffer, and flush
      * it only when it grows. however for larger writes, we prefer to flush
@@ -452,7 +460,10 @@ static size_t rioFdWrite(rio *r, const void *buf, size_t len) {
 
     size_t nwritten = 0;
     while (nwritten != len) {
+        syscall_start_time = ustime(); // Start time for this syscall
         retval = write(r->io.fd.fd, p + nwritten, len - nwritten);
+        syscall_end_time = ustime(); // End time for this syscall
+
         if (retval <= 0) {
             if (retval == -1 && errno == EINTR) continue;
             /* With blocking io, which is the sole user of this
@@ -464,6 +475,12 @@ static size_t rioFdWrite(rio *r, const void *buf, size_t len) {
         }
         nwritten += retval;
     }
+
+        // Accumulate statistics for the *actual write() syscall*
+    long long syscall_duration_us = syscall_end_time - syscall_start_time;
+    g_rioFdWrite_syscall_total_duration_us += syscall_duration_us;
+    g_rioFdWrite_syscall_total_bytes += retval; // Accumulate bytes written by this specific syscall
+    g_rioFdWrite_syscall_calls++;
 
     r->io.fd.pos += len;
     sdsclear(r->io.fd.buf);
