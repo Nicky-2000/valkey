@@ -432,8 +432,6 @@ static size_t rioFdWrite(rio *r, const void *buf, size_t len) {
     ssize_t retval;
     unsigned char *p = (unsigned char *)buf;
     int doflush = (buf == NULL && len == 0);
-    long long syscall_start_time = ustime(); // Start time for this syscall
-    long long syscall_end_time = ustime(); // End time for this syscall
 
 
 
@@ -460,9 +458,7 @@ static size_t rioFdWrite(rio *r, const void *buf, size_t len) {
 
     size_t nwritten = 0;
     while (nwritten != len) {
-        syscall_start_time = ustime(); // Start time for this syscall
         retval = write(r->io.fd.fd, p + nwritten, len - nwritten);
-        syscall_end_time = ustime(); // End time for this syscall
 
         if (retval <= 0) {
             if (retval == -1 && errno == EINTR) continue;
@@ -475,12 +471,6 @@ static size_t rioFdWrite(rio *r, const void *buf, size_t len) {
         }
         nwritten += retval;
     }
-
-        // Accumulate statistics for the *actual write() syscall*
-    long long syscall_duration_us = syscall_end_time - syscall_start_time;
-    g_rioFdWrite_syscall_total_duration_us += syscall_duration_us;
-    g_rioFdWrite_syscall_total_bytes += retval; // Accumulate bytes written by this specific syscall
-    g_rioFdWrite_syscall_calls++;
 
     r->io.fd.pos += len;
     sdsclear(r->io.fd.buf);
